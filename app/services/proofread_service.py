@@ -6,6 +6,7 @@ from typing import Iterator
 
 from fastapi import Depends
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal, get_db
@@ -16,7 +17,7 @@ from app.repositories.document_repository import (
     DocumentVersionRepository,
 )
 from app.repositories.user_repository import UserRepository
-from app.schemas.proofread import ProofreadFindingRead, ProofreadResult
+from app.schemas.proofread import FindingStatus, ProofreadFindingRead, ProofreadResult
 from app.services.activity_service import (
     Action,
     ActivityService,
@@ -47,11 +48,39 @@ class AnalysisNotFoundError(Exception):
         super().__init__(f"Analysis {analysis_id} not found")
 
 
+class AnalysisNotCompletedError(Exception):
+    def __init__(self, analysis_id: int) -> None:
+        self.analysis_id = analysis_id
+        super().__init__(f"Analysis {analysis_id} is not completed yet")
+
+
+class FindingNotFoundError(Exception):
+    def __init__(self, finding_id: str) -> None:
+        self.finding_id = finding_id
+        super().__init__(f"Finding {finding_id} not found")
+
+
+def rehydrate_findings(result: dict) -> list[ProofreadFindingRead]:
+    """findings JSONB를 스키마로 복원한다.
+
+    구버전 레코드(id/status 필드가 생기기 전에 저장됨)는 리스트 위치 기반으로
+    id를 채우고 status는 pending으로 기본값을 준다 — apply/PATCH 쪽에서도
+    같은 위치 기반 id 규칙을 써야 GET에서 본 id와 어긋나지 않는다.
+    """
+    raw = result.get("findings", [])
+    out: list[ProofreadFindingRead] = []
+    for i, f in enumerate(raw):
+        merged = {"id": f"f{i}", "status": FindingStatus.PENDING.value, **f}
+        out.append(ProofreadFindingRead(**merged))
+    return out
+
+
 def build_result(
     record: AiAnalysisResult,
     findings: list[ProofreadFindingRead],
     scanned: int,
 ) -> ProofreadResult:
+    result = record.result or {}
     return ProofreadResult(
         id=record.id,
         document_id=record.document_id,
@@ -63,6 +92,8 @@ def build_result(
         sections_scanned=scanned,
         error=record.error,
         created_at=record.created_at,
+        applied_version_id=result.get("applied_version_id"),
+        applied_at=result.get("applied_at"),
     )
 
 
@@ -134,7 +165,40 @@ class ProofreadService:
         if record is None or record.document_id != document_id:
             raise AnalysisNotFoundError(analysis_id)
         result = record.result or {}
-        findings = [ProofreadFindingRead(**f) for f in result.get("findings", [])]
+        findings = rehydrate_findings(result)
+        scanned = (result.get("summary") or {}).get("sections_scanned", 0)
+        return build_result(record, findings, scanned)
+
+    def set_finding_status(
+        self,
+        document_id: int,
+        analysis_id: int,
+        finding_id: str,
+        new_status: FindingStatus,
+    ) -> ProofreadResult:
+        record = self.analyses.get(analysis_id)
+        if record is None or record.document_id != document_id:
+            raise AnalysisNotFoundError(analysis_id)
+        if record.status != "COMPLETED":
+            raise AnalysisNotCompletedError(analysis_id)
+
+        result = record.result or {}
+        raw = result.get("findings", [])
+        found = False
+        for i, f in enumerate(raw):
+            if f.get("id", f"f{i}") == finding_id:
+                f["id"] = finding_id  # 구버전 레코드 id 역채움
+                f["status"] = new_status.value
+                found = True
+                break
+        if not found:
+            raise FindingNotFoundError(finding_id)
+
+        record.result = result
+        flag_modified(record, "result")
+        self.analyses.update(record)
+
+        findings = rehydrate_findings(result)
         scanned = (result.get("summary") or {}).get("sections_scanned", 0)
         return build_result(record, findings, scanned)
 
@@ -232,6 +296,9 @@ def run_proofread_task(analysis_id: int) -> None:
                                     page_end=section.page_end,
                                 )
                             )
+
+            for i, f in enumerate(findings):
+                f.id = f"f{i}"
 
             record.result = {
                 "findings": [f.model_dump() for f in findings],

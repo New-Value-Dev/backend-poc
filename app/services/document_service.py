@@ -245,6 +245,43 @@ class DocumentService:
         self.documents.commit_refresh(document, version)
         return document, version
 
+    def create_version(
+        self,
+        document_id: int,
+        *,
+        filename: str,
+        content_type: str | None,
+        data: bytes,
+    ) -> DocumentVersion:
+        """기존 document 에 새 버전(v2+)을 추가한다. upload_document 와 달리 Document 는 새로 만들지 않는다."""
+        document = self.get_document(document_id)
+        existing = self.versions.list_by_document(document_id)  # version_no desc
+        version_no = (existing[0].version_no + 1) if existing else 1
+
+        ext = filename.rsplit(".", 1)[1].lower() if "." in filename else ""
+        stored_name = f"{uuid.uuid4().hex}.{ext}" if ext else uuid.uuid4().hex
+        relative_dir = (
+            f"documents/project-{document.project_id}/document-{document.id}/v{version_no}"
+        )
+        storage_path = self.storage.save(relative_dir, stored_name, data)
+
+        version = self.versions.add(
+            DocumentVersion(
+                document_id=document.id,
+                version_no=version_no,
+                original_file_name=filename,
+                storage_path=storage_path,
+                mime_type=content_type,
+                file_size=len(data),
+                checksum=hashlib.sha256(data).hexdigest(),
+                processing_status="UPLOADED",
+            )
+        )
+
+        document.current_version_id = version.id
+        self.documents.commit_refresh(document, version)
+        return version
+
     def delete_document(self, document_id: int) -> None:
         doc = self.get_document(document_id)
         relative_dir = f"documents/project-{doc.project_id}/document-{doc.id}"

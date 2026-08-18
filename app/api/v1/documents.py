@@ -250,6 +250,9 @@ def download_document(
         path,
         filename=version.original_file_name,
         media_type=version.mime_type or "application/octet-stream",
+        # 이 URL은 버전이 바뀌어도(v1→v2) 그대로라, 캐시 기본값에 맡기면 브라우저가
+        # 교정 적용 후에도 예전 버전을 재요청 없이 그대로 보여줄 수 있다.
+        headers={"Cache-Control": "no-store"},
     )
 
 

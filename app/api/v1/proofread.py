@@ -12,11 +12,27 @@ from fastapi import (
 
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.schemas.proofread import AnalysisSummary, ProofreadResult
+from app.schemas.proofread import (
+    AnalysisSummary,
+    ApplyCorrectionsResponse,
+    FindingStatusUpdate,
+    ProofreadResult,
+)
+from app.services.activity_service import Action, ActivityService, get_activity_service
+from app.services.correction_service import (
+    AlreadyAppliedError,
+    CorrectionService,
+    NoAcceptedFindingsError,
+    UnsupportedFileTypeError,
+    get_correction_service,
+)
 from app.services.document_service import DocumentNotFoundError, VersionNotFoundError
+from app.services.parsing_service import run_parse_task
 from app.services.proofread_service import (
+    AnalysisNotCompletedError,
     AnalysisNotFoundError,
     DocumentNotReadyError,
+    FindingNotFoundError,
     ProofreadService,
     build_result,
     get_proofread_service,
@@ -121,3 +137,111 @@ def get_analysis(
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, f"Analysis {analysis_id} not found"
         ) from None
+
+
+FindingIdPath = Annotated[
+    str, Path(description="finding id — 분석 결과의 finding.id", examples=["f0"])
+]
+
+
+@router.patch(
+    "/documents/{document_id}/analyses/{analysis_id}/findings/{finding_id}",
+    response_model=ProofreadResult,
+    summary="finding 승인/반려 상태 변경",
+    response_description="갱신된 findings 목록을 포함한 전체 분석 결과",
+    responses={
+        **AUTH_RESPONSES,
+        404: {"description": "분석 또는 finding 없음"},
+        409: {"description": "분석이 아직 완료되지 않음"},
+    },
+)
+def update_finding_status(
+    document_id: DocumentIdPath,
+    analysis_id: AnalysisIdPath,
+    finding_id: FindingIdPath,
+    body: FindingStatusUpdate,
+    service: ProofreadService = Depends(get_proofread_service),
+    _: User = Depends(get_current_user),
+) -> ProofreadResult:
+    """finding 하나를 accepted/rejected/pending 으로 표시한다. apply 는 accepted 상태만 반영한다"""
+    try:
+        return service.set_finding_status(document_id, analysis_id, finding_id, body.status)
+    except AnalysisNotFoundError:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Analysis {analysis_id} not found"
+        ) from None
+    except FindingNotFoundError:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Finding {finding_id} not found"
+        ) from None
+    except AnalysisNotCompletedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+
+
+@router.post(
+    "/documents/{document_id}/analyses/{analysis_id}/apply",
+    response_model=ApplyCorrectionsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="승인된 교정을 원본 파일에 반영 (새 버전 생성)",
+    response_description="새 버전 id + 반영/스킵 개수(202, 파싱은 백그라운드에서 이어짐)",
+    responses={
+        **AUTH_RESPONSES,
+        400: {"description": "지원하지 않는 파일 형식이거나 승인된 finding이 없음/전부 매칭 실패"},
+        404: {"description": "분석 없음"},
+        409: {"description": "분석이 미완료 상태이거나 이미 적용됨"},
+    },
+)
+def apply_corrections(
+    document_id: DocumentIdPath,
+    analysis_id: AnalysisIdPath,
+    background_tasks: BackgroundTasks,
+    corrections: CorrectionService = Depends(get_correction_service),
+    activity: ActivityService = Depends(get_activity_service),
+    _: User = Depends(get_current_user),
+) -> ApplyCorrectionsResponse:
+    """accepted 상태인 finding들을 DOCX/HWPX는 실제 편집, PDF는 시각적 패치로 반영해
+    새 문서 버전을 만들고, 반영된 파일을 다시 파싱/청킹하도록 백그라운드 작업을 건다"""
+    try:
+        outcome = corrections.apply(document_id, analysis_id)
+    except AnalysisNotFoundError:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Analysis {analysis_id} not found"
+        ) from None
+    except AnalysisNotCompletedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    except AlreadyAppliedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    except NoAcceptedFindingsError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+    except UnsupportedFileTypeError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+    except VersionNotFoundError:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "No stored version for this analysis"
+        ) from None
+
+    background_tasks.add_task(run_parse_task, outcome.new_version.id)
+
+    doc = corrections.documents.get_document(document_id)
+    activity.record(
+        Action.CORRECTIONS_APPLY,
+        project_id=doc.project_id,
+        target_type="document",
+        target_id=document_id,
+        target_label=doc.name,
+        meta={
+            "analysis_id": analysis_id,
+            "new_version_id": outcome.new_version.id,
+            "applied_count": outcome.applied_count,
+            "skipped_count": outcome.skipped_count,
+        },
+    )
+    return ApplyCorrectionsResponse(
+        analysis_id=analysis_id,
+        document_id=document_id,
+        new_version_id=outcome.new_version.id,
+        new_version_no=outcome.new_version.version_no,
+        applied_count=outcome.applied_count,
+        skipped_count=outcome.skipped_count,
+        skipped_reasons=outcome.skipped_reasons,
+    )

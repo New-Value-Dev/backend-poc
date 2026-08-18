@@ -16,7 +16,7 @@ from app.services.parsing.base import (
 )
 
 
-def _iter_block_items(document: DocxDocument):
+def iter_block_items(document: DocxDocument):
     """문서 본문의 문단/표를 순서대로 순회한다."""
     body = document.element.body
     for child in body.iterchildren():
@@ -40,7 +40,7 @@ def _heading_level(style_name: str | None) -> int | None:
     return None
 
 
-def _table_text(table: Table) -> str:
+def table_text(table: Table) -> str:
     rows = []
     for row in table.rows:
         rows.append(" | ".join(cell.text.strip() for cell in row.cells))
@@ -56,7 +56,7 @@ class DocxParser:
         sections: list[UnifiedSection] = []
         order = 0
 
-        for block in _iter_block_items(document):
+        for block in iter_block_items(document):
             if isinstance(block, Paragraph):
                 text = block.text.strip()
                 if not text:
@@ -78,7 +78,7 @@ class DocxParser:
                     )
                 order += 1
             elif isinstance(block, Table):
-                text = _table_text(block)
+                text = table_text(block)
                 if not text.strip():
                     continue
                 sections.append(

@@ -9,7 +9,7 @@ from app.services.parsing.base import (
     UnifiedSection,
 )
 
-_BLANK_LINE = re.compile(r"\n\s*\n")
+BLANK_LINE_RE = re.compile(r"\n\s*\n")
 
 
 class TextParser:
@@ -22,7 +22,7 @@ class TextParser:
 
         sections: list[UnifiedSection] = []
         order = 0
-        for block in _BLANK_LINE.split(text):
+        for block in BLANK_LINE_RE.split(text):
             stripped = block.strip()
             if not stripped:
                 continue

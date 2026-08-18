@@ -26,3 +26,9 @@ class AiAnalysisResultRepository:
         if analysis_type is not None:
             stmt = stmt.where(AiAnalysisResult.analysis_type == analysis_type)
         return list(self.db.scalars(stmt.order_by(AiAnalysisResult.id.desc())))
+
+    def update(self, result: AiAnalysisResult) -> AiAnalysisResult:
+        """JSONB 필드를 in-place로 고친 뒤(+ flag_modified) 커밋한다."""
+        self.db.commit()
+        self.db.refresh(result)
+        return result

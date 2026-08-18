@@ -37,6 +37,8 @@ class Action:
     ANALYSIS_COMPLETE = "analysis.complete"
     ANALYSIS_FAIL = "analysis.fail"
 
+    CORRECTIONS_APPLY = "corrections.apply"
+
 
 # 액션 코드 
 ACTION_LABELS: dict[str, tuple[str, str]] = {
@@ -49,6 +51,7 @@ ACTION_LABELS: dict[str, tuple[str, str]] = {
     Action.FOLDER_DELETE: ("폴더 삭제", "삭제"),
     Action.DOCUMENT_UPLOAD: ("문서 업로드", "업로드"),
     Action.DOCUMENT_DELETE: ("문서 삭제", "삭제"),
+    Action.CORRECTIONS_APPLY: ("교정 적용", "교정"),
 }
 
 ANALYSIS_LABELS: dict[str, tuple[str, str]] = {
