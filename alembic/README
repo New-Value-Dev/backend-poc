@@ -1,0 +1,66 @@
+Generic single-database configuration.
+
+---
+
+## Alembic 사용법
+
+DB 스키마는 전부 Alembic 마이그레이션으로 관리한다. DBeaver 등에서 직접 DDL을 치지 말 것.
+모든 명령은 `backend/` 디렉터리에서, 로컬 `.venv`로 실행한다 (host에서 `localhost:5432`로 접속).
+
+### 기본 흐름
+
+1. `app/models/`에 모델을 추가/수정한다.
+2. **새 모델을 만들었다면 반드시 `app/models/__init__.py`에 등록한다.** 여기 등록되지 않으면
+   `Base.metadata`에 안 잡혀서 autogenerate가 테이블을 아예 못 본다.
+3. 마이그레이션 파일을 자동 생성한다.
+
+   ```bash
+   alembic revision --autogenerate -m "meaningful message"
+   ```
+
+4. `alembic/versions/`에 생성된 파일을 **꼭 열어서 확인**한다. autogenerate는 참고용 초안일 뿐이고,
+   특히 아래 항목은 자동으로 못 잡거나 잘못 잡을 수 있다:
+   - 컬럼 rename (drop+add로 잘못 인식되어 데이터 유실 위험)
+   - 인덱스/제약조건 이름
+   - `pgvector.Vector` 타입 (env.py의 `render_item`이 import까지 챙겨주긴 하지만 dim 등은 확인)
+   - server_default, nullable 변경 시 기존 row 처리
+5. 적용한다.
+
+   ```bash
+   alembic upgrade head
+   ```
+
+### 자주 쓰는 명령
+
+```bash
+alembic current # 현재 DB가 어느 revision에 있는지
+alembic history # 전체 revision 히스토리 (선형)
+alembic upgrade head # 최신까지 적용
+alembic upgrade +1 # 한 단계만 적용
+alembic downgrade -1 # 한 단계 롤백
+alembic downgrade <revision> # 특정 revision으로 롤백
+alembic revision -m "message" # 빈 마이그레이션 (수동 작성용, autogenerate 없이)
+```
+
+### 팀 온보딩 / 새 환경
+
+```bash
+cd ..                        # sidepjt 루트
+docker compose up --build    # db, backend 컨테이너 기동
+cd backend
+alembic upgrade head         # 스키마 최신화
+```
+
+### 주의사항
+
+- **`DATABASE_URL`은 `env.py`가 `app/core/config.py`의 `get_settings()`를 통해 주입한다.**
+  `alembic.ini`의 `sqlalchemy.url`은 더미 값(`driver://user:pass@localhost/dbname`)이라 신경 쓸 필요 없음 —
+  실제 접속 정보는 `.env`(로컬) / compose `environment:`(컨테이너, `DATABASE_URL`이 `.env`를 override)에서 온다.
+- `vector` extension은 첫 마이그레이션(`b41df68258a9_create_document_core_tables`)에서 자동 생성된다.
+  pgvector 관련 컬럼 추가 시 extension을 따로 만들 필요 없음.
+- 마이그레이션 파일명은 기본 템플릿(`%(rev)s_%(slug)s.py`)을 그대로 쓴다. `alembic.ini`의
+  `file_template`은 주석 처리된 상태 그대로 유지.
+- 프로덕션 데이터가 이미 들어간 뒤에 컬럼 삭제/타입 변경 마이그레이션을 짤 때는 downgrade도
+  실제로 되돌릴 수 있게 작성한다 (`pass`로 비워두지 않기).
+- 여러 브랜치에서 동시에 마이그레이션을 만들면 revision이 갈라질 수 있다 (`alembic history`에서
+  head가 여러 개로 보임). 이 경우 `alembic merge heads -m "merge"`로 합친 뒤 적용한다.
