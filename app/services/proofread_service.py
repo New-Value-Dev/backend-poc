@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Iterator
 
 from fastapi import Depends
@@ -201,26 +202,36 @@ def run_proofread_task(analysis_id: int) -> None:
                 if text:
                     items.append((s, text[: settings.proofread_max_chars_per_section]))
 
+            batches = list(
+                _iter_batches(
+                    items,
+                    settings.proofread_batch_max_chars,
+                    settings.proofread_batch_max_sections,
+                )
+            )
+
+            def _run_batch(batch: list[tuple]) -> tuple[list[tuple], list]:
+                return batch, provider.proofread_batch([t for _, t in batch])
+
             findings: list[ProofreadFindingRead] = []
-            for batch in _iter_batches(
-                items,
-                settings.proofread_batch_max_chars,
-                settings.proofread_batch_max_sections,
-            ):
-                batch_out = provider.proofread_batch([t for _, t in batch])
-                for (section, _), fs in zip(batch, batch_out):
-                    for f in fs:
-                        findings.append(
-                            ProofreadFindingRead(
-                                original=f.original,
-                                suggestion=f.suggestion,
-                                reason=f.reason,
-                                category=f.category,
-                                section_id=section.id,
-                                page_start=section.page_start,
-                                page_end=section.page_end,
+            with ThreadPoolExecutor(
+                max_workers=min(settings.proofread_batch_concurrency, len(batches) or 1)
+            ) as pool:
+                results = pool.map(_run_batch, batches) if batches else []
+                for batch, batch_out in results:
+                    for (section, _), fs in zip(batch, batch_out):
+                        for f in fs:
+                            findings.append(
+                                ProofreadFindingRead(
+                                    original=f.original,
+                                    suggestion=f.suggestion,
+                                    reason=f.reason,
+                                    category=f.category,
+                                    section_id=section.id,
+                                    page_start=section.page_start,
+                                    page_end=section.page_end,
+                                )
                             )
-                        )
 
             record.result = {
                 "findings": [f.model_dump() for f in findings],

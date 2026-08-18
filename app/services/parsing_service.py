@@ -87,6 +87,15 @@ def parse_version(db, version_id: int) -> None:
         version.processing_status = "PARSED"
         db.commit()
         logger.info("parsed version %s: %s sections (%s)", version_id, n, version.parser_version)
+
+        if unified.ocr_used:
+            line_count = unified.meta.get("ocr_line_count", 0)
+            low_conf_count = unified.meta.get("ocr_low_confidence_count", 0)
+            if line_count and low_conf_count / line_count >= 0.3:
+                logger.warning(
+                    "version %s: OCR low-confidence lines %s/%s (%.0f%%) — 재확인 권장",
+                    version_id, low_conf_count, line_count, 100 * low_conf_count / line_count,
+                )
     except Exception as exc:
         db.rollback()
         version = db.get(DocumentVersion, version_id)

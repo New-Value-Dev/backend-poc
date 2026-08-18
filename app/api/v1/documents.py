@@ -158,7 +158,10 @@ async def upload_document(
     )
 
     background_tasks.add_task(run_parse_task, version.id)
-    return DocumentUploadResponse(document=document, version=version)
+    # document 는 아직 author 가 채워지지 않은 ORM 객체이므로, 목록/상세와 동일하게
+    # 조회 경로를 다시 태워 author(작성자 이름)를 채운 뒤 응답한다.
+    document_read = service.get_document_read(document.id)
+    return DocumentUploadResponse(document=document_read, version=version)
 
 
 @router.get(

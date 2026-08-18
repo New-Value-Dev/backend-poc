@@ -27,11 +27,13 @@ class OpenAILLMProvider:
         base_url: str,
         categories: Iterable[str] = ("spelling", "spacing"),
         timeout: float = 120.0,
+        reasoning_effort: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._reasoning_effort = reasoning_effort
         self.name = f"openai:{model}"
 
         self._categories = [c for c in KNOWN_CATEGORIES if c in set(categories)] or [
@@ -79,6 +81,8 @@ class OpenAILLMProvider:
                 {"role": "user", "content": user},
             ],
         }
+        if self._reasoning_effort:
+            payload["reasoning_effort"] = self._reasoning_effort
         try:
             resp = httpx.post(
                 f"{self._base_url}/chat/completions",

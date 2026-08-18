@@ -11,10 +11,11 @@ from app.services.parsing.base import (
     UnifiedDocument,
     UnifiedSection,
 )
-from app.services.parsing.ocr import OCRProvider, OCRWord
+from app.services.parsing.ocr import OCRProvider, OCRWord, preprocess_for_ocr
 
 OCR_DPI = 200
 _MIN_NATIVE_CHARS = 3  # 이보다 텍스트가 적으면 스캔본으로 보고 OCR
+OCR_LOW_CONFIDENCE_THRESHOLD = 60.0  # 이 미만이면 재확인이 필요한 줄로 표시
 
 
 class PdfParser:
@@ -30,6 +31,8 @@ class PdfParser:
         sections: list[UnifiedSection] = []
         order = 0
         ocr_used = False
+        ocr_line_count = 0
+        ocr_low_conf_count = 0
         try:
             for page_index in range(page_count):
                 page = doc[page_index]
@@ -39,8 +42,12 @@ class PdfParser:
                 if len(native_text) >= _MIN_NATIVE_CHARS:
                     order = self._parse_native_page(page, page_no, sections, order)
                 elif self.ocr is not None:
-                    order, did_ocr = self._parse_ocr_page(page, page_no, sections, order)
+                    order, did_ocr, line_count, low_conf_count = self._parse_ocr_page(
+                        page, page_no, sections, order
+                    )
                     ocr_used = ocr_used or did_ocr
+                    ocr_line_count += line_count
+                    ocr_low_conf_count += low_conf_count
                 else:
                     sections.append(
                         UnifiedSection(
@@ -53,9 +60,15 @@ class PdfParser:
         finally:
             doc.close()
 
+        doc_meta: dict = {}
+        if ocr_used:
+            doc_meta["ocr_line_count"] = ocr_line_count
+            doc_meta["ocr_low_confidence_count"] = ocr_low_conf_count
+
         return UnifiedDocument(
             sections=sections, parser_name=self.name,
             page_count=page_count, ocr_used=ocr_used,
+            meta=doc_meta,
         )
 
     def _parse_native_page(self, page, page_no, sections, order) -> int:
@@ -90,15 +103,23 @@ class PdfParser:
             order += 1
         return order
 
-    def _parse_ocr_page(self, page, page_no, sections, order) -> tuple[int, bool]:
+    def _parse_ocr_page(self, page, page_no, sections, order) -> tuple[int, bool, int, int]:
         zoom = OCR_DPI / 72.0
         pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
         image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        image = preprocess_for_ocr(image)
         words = self.ocr.recognize(image)
         if not words:
-            return order, True
+            return order, True, 0, 0
 
-        for line_words in _group_lines(words):
+        lines = _group_lines(words)
+        line_heights = [_line_height(line_words) for line_words in lines]
+        positive_heights = [h for h in line_heights if h > 0]
+        body_height = statistics.median(positive_heights) if positive_heights else 0.0
+
+        line_count = 0
+        low_conf_count = 0
+        for line_words, line_height in zip(lines, line_heights):
             text = " ".join(w.text for w in line_words).strip()
             if not text:
                 continue
@@ -107,19 +128,36 @@ class PdfParser:
             xs1 = max(w.bbox[2] for w in line_words) / zoom
             ys1 = max(w.bbox[3] for w in line_words) / zoom
             avg_conf = round(sum(w.confidence for w in line_words) / len(line_words), 1)
+            is_heading = (
+                body_height > 0 and line_height >= body_height * 1.3 and len(text) <= 120
+            )
+            low_confidence = avg_conf < OCR_LOW_CONFIDENCE_THRESHOLD
             sections.append(
                 UnifiedSection(
-                    content=text, order=order,
-                    level=BODY_LEVEL, section_type="paragraph",
+                    content=text,
+                    title=text if is_heading else None,
+                    order=order,
+                    level=1 if is_heading else BODY_LEVEL,
+                    section_type="heading" if is_heading else "paragraph",
                     page_start=page_no, page_end=page_no,
                     meta={
                         "bbox": [round(xs0, 1), round(ys0, 1), round(xs1, 1), round(ys1, 1)],
                         "ocr": True, "confidence": avg_conf,
+                        "line_height": round(line_height / zoom, 1),
+                        "low_confidence": low_confidence,
                     },
                 )
             )
             order += 1
-        return order, True
+            line_count += 1
+            low_conf_count += 1 if low_confidence else 0
+        return order, True, line_count, low_conf_count
+
+
+def _line_height(line_words: list[OCRWord]) -> float:
+    if not line_words:
+        return 0.0
+    return max(w.bbox[3] for w in line_words) - min(w.bbox[1] for w in line_words)
 
 
 def _group_lines(words: list[OCRWord]) -> list[list[OCRWord]]:
