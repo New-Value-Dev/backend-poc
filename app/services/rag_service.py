@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
@@ -35,6 +37,38 @@ def _section_title(chunk_metadata: dict | None) -> str | None:
         return None
     path = chunk_metadata.get("heading_path")
     return path[-1] if path else None
+
+
+@dataclass
+class _MatchedChunk:
+    """검색된 chunk 1건 — search() Row 와 형제 확장으로 끌어온 Row 를 같은
+    모양으로 다뤄서 contexts/citations 조립 코드가 출처를 신경 안 써도 되게 한다."""
+
+    chunk_id: int
+    content: str
+    section_id: int | None
+    document_version_id: int
+    page_start: int | None
+    page_end: int | None
+    chunk_metadata: dict | None
+    document_id: int
+    document_name: str
+    distance: float
+
+
+def _to_matched_chunk(row, distance: float) -> _MatchedChunk:
+    return _MatchedChunk(
+        chunk_id=row.chunk_id,
+        content=row.content,
+        section_id=row.section_id,
+        document_version_id=row.document_version_id,
+        page_start=row.page_start,
+        page_end=row.page_end,
+        chunk_metadata=row.chunk_metadata,
+        document_id=row.document_id,
+        document_name=row.document_name,
+        distance=distance,
+    )
 
 
 class RagService:
@@ -76,7 +110,12 @@ class RagService:
             project_ids=project_ids,
             folder_ids=folder_ids,
         )
-        rows = [r for r in rows if (1 - r.distance) >= self.settings.rag_min_score]
+        matched = [
+            _to_matched_chunk(r, r.distance)
+            for r in rows
+            if (1 - r.distance) >= self.settings.rag_min_score
+        ]
+        rows = self._expand_siblings(matched) if self.settings.rag_expand_siblings else matched
 
         contexts = [
             RagContextChunk(
@@ -131,6 +170,32 @@ class RagService:
             provider=self.llm.name,
             created_at=record.created_at,
         )
+
+    def _expand_siblings(self, matched: list[_MatchedChunk]) -> list[_MatchedChunk]:
+        """같은 article_key(조)를 공유하는 나머지 청크를 원래 매치 바로 뒤에 끼워
+        넣는다. 조 하나가 chunk_max_chars 를 넘어 여러 청크로 쪼개졌을 때, 벡터
+        검색에 그중 일부만 걸려도 나머지를 컨텍스트에 마저 채우기 위함.
+        형제 청크는 독립적으로 채점된 게 아니라 원래 매치의 distance 를 물려받는다."""
+        expanded: list[_MatchedChunk] = []
+        seen_ids = {m.chunk_id for m in matched}
+        extra_budget = self.settings.rag_expand_max_extra
+        for match in matched:
+            expanded.append(match)
+            article_key = (match.chunk_metadata or {}).get("article_key")
+            if not article_key or extra_budget <= 0:
+                continue
+            siblings = self.chunks.get_chunks_by_article_key(
+                match.document_version_id, article_key, exclude_chunk_ids=seen_ids
+            )
+            for sibling in siblings:
+                if extra_budget <= 0:
+                    break
+                if sibling.chunk_id in seen_ids:
+                    continue
+                expanded.append(_to_matched_chunk(sibling, match.distance))
+                seen_ids.add(sibling.chunk_id)
+                extra_budget -= 1
+        return expanded
 
     def history(self, *, limit: int) -> list[RagHistoryItem]:
         return [

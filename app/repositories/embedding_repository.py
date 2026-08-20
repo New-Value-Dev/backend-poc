@@ -79,6 +79,7 @@ class ChunkEmbeddingRepository:
                 DocumentChunk.id.label("chunk_id"),
                 DocumentChunk.content,
                 DocumentChunk.section_id,
+                DocumentChunk.document_version_id,
                 DocumentChunk.page_start,
                 DocumentChunk.page_end,
                 DocumentChunk.chunk_metadata,
@@ -98,4 +99,38 @@ class ChunkEmbeddingRepository:
         if folder_ids:
             stmt = stmt.where(Document.folder_id.in_(folder_ids))
         stmt = stmt.order_by(distance).limit(top_k)
+        return list(self.db.execute(stmt))
+
+    def get_chunks_by_article_key(
+        self,
+        document_version_id: int,
+        article_key: str,
+        *,
+        exclude_chunk_ids: set[int],
+    ) -> list[Row]:
+        """같은 조(article_key)에 속하지만 벡터 검색에 안 걸린 나머지 청크(형제)를
+        chunk_index 순으로 가져온다. 컨텍스트 확장용 -- search() 와 동일한
+        컬럼셋(distance 제외)을 써서 호출부에서 바로 이어붙일 수 있게 한다."""
+        stmt = (
+            select(
+                DocumentChunk.id.label("chunk_id"),
+                DocumentChunk.content,
+                DocumentChunk.section_id,
+                DocumentChunk.document_version_id,
+                DocumentChunk.page_start,
+                DocumentChunk.page_end,
+                DocumentChunk.chunk_metadata,
+                DocumentChunk.document_id,
+                Document.name.label("document_name"),
+                Document.project_id,
+                Document.folder_id,
+            )
+            .select_from(DocumentChunk)
+            .join(Document, DocumentChunk.document_id == Document.id)
+            .where(DocumentChunk.document_version_id == document_version_id)
+            .where(DocumentChunk.chunk_metadata["article_key"].astext == article_key)
+        )
+        if exclude_chunk_ids:
+            stmt = stmt.where(DocumentChunk.id.notin_(exclude_chunk_ids))
+        stmt = stmt.order_by(DocumentChunk.chunk_index)
         return list(self.db.execute(stmt))

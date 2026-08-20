@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     rag_top_k: int = 6
     rag_min_score: float = 0.3           # 코사인 유사도 하한(너무 안 비슷한 매치 컷)
     rag_context_max_chars: int = 1200    # LLM에 넘길 chunk당 최대 글자수
+    rag_expand_siblings: bool = True     # 같은 조(article_key)의 나머지 청크를 컨텍스트에 같이 넣을지
+    rag_expand_max_extra: int = 6        # 형제 확장으로 추가할 청크 최대 개수(비용/길이 억제)
 
 
 @lru_cache
