@@ -97,7 +97,11 @@ class DocumentService:
         )
 
     def list_recent_documents(
-        self, *, limit: int, project_id: int | None = None
+        self,
+        *,
+        limit: int,
+        project_id: int | None = None,
+        accessible_project_ids=None,
     ) -> list[RecentDocumentRead]:
         """대시보드 최근 문서 카드용 — 프로젝트를 가로질러 최근 등록순"""
         if project_id is not None:
@@ -111,10 +115,14 @@ class DocumentService:
                 processing_status=row.processing_status,
                 created_at=row.created_at,
             )
-            for row in self.documents.list_recent(limit=limit, project_id=project_id)
+            for row in self.documents.list_recent(
+                limit=limit, project_id=project_id, accessible_project_ids=accessible_project_ids
+            )
         ]
 
-    def search_documents(self, q: str, *, limit: int) -> list[RecentDocumentRead]:
+    def search_documents(
+        self, q: str, *, limit: int, accessible_project_ids=None
+    ) -> list[RecentDocumentRead]:
         """전역 검색창용 — 이름/설명 키워드로 프로젝트를 가로질러 검색"""
         q = q.strip()
         if not q:
@@ -128,7 +136,9 @@ class DocumentService:
                 processing_status=row.processing_status,
                 created_at=row.created_at,
             )
-            for row in self.documents.search(q, limit=limit)
+            for row in self.documents.search(
+                q, limit=limit, accessible_project_ids=accessible_project_ids
+            )
         ]
 
     def get_document(self, document_id: int) -> Document:
@@ -298,6 +308,20 @@ class DocumentService:
         document.current_version_id = version.id
         self.documents.commit_refresh(document, version)
         return version
+
+    def move_document(
+        self, document_id: int, *, project_id: int | None, folder_id: int | None
+    ) -> Document:
+        """개인 프로젝트에서 완성한 문서를 다른 프로젝트로 옮긴다"""
+        doc = self.get_document(document_id)
+        target_project_id = project_id if project_id is not None else doc.project_id
+        self._ensure_project(target_project_id)
+        if folder_id is not None:
+            self._ensure_folder_in_project(target_project_id, folder_id)
+        doc.project_id = target_project_id
+        doc.folder_id = folder_id
+        self.documents.commit_refresh(doc)
+        return doc
 
     def delete_document(self, document_id: int) -> None:
         doc = self.get_document(document_id)

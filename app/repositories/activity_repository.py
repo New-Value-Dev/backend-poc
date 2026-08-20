@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.activity_log import ActivityLog
@@ -34,10 +34,18 @@ class ActivityLogRepository:
         project_id: int | None = None,
         action: str | None = None,
         actor_id: int | None = None,
+        accessible_project_ids=None,
     ) -> list[ActivityLog]:
         stmt = select(ActivityLog)
         if project_id is not None:
             stmt = stmt.where(ActivityLog.project_id == project_id)
+        elif accessible_project_ids is not None:
+            stmt = stmt.where(
+                or_(
+                    ActivityLog.project_id.is_(None),
+                    ActivityLog.project_id.in_(accessible_project_ids),
+                )
+            )
         if action is not None:
             stmt = stmt.where(ActivityLog.action == action)
         if actor_id is not None:

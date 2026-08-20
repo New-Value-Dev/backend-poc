@@ -39,6 +39,18 @@ class AuthorInfo(BaseModel):
     email: str | None
 
 
+class DocumentMove(BaseModel):
+    """개인 프로젝트에서 완성한 문서를 다른 프로젝트로 옮길 때"""
+
+    project_id: int | None = Field(
+        default=None,
+        description="옮길 대상 프로젝트 id. 생략하면 현재 프로젝트를 유지한 채 folder_id만 바뀐다",
+    )
+    folder_id: int | None = Field(
+        default=None, description="대상 프로젝트 내 폴더 id. 생략하면 최상위(폴더 없음)로 이동"
+    )
+
+
 class DocumentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

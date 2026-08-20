@@ -25,6 +25,11 @@ class Action:
     PROJECT_CREATE = "project.create"
     PROJECT_UPDATE = "project.update"
     PROJECT_DELETE = "project.delete"
+    PROJECT_VISIBILITY_CHANGE = "project.visibility_change"
+    PROJECT_MEMBER_INVITE = "project.member_invite"
+    PROJECT_MEMBER_REMOVE = "project.member_remove"
+    PROJECT_MEMBER_ACCEPT = "project.member_accept"
+    PROJECT_MEMBER_DECLINE = "project.member_decline"
 
     FOLDER_CREATE = "folder.create"
     FOLDER_UPDATE = "folder.update"
@@ -32,6 +37,8 @@ class Action:
 
     DOCUMENT_UPLOAD = "document.upload"
     DOCUMENT_DELETE = "document.delete"
+    DOCUMENT_MOVE = "document.move"
+    DOCUMENT_FOLDER_CHANGE = "document.folder_change"
 
     ANALYSIS_START = "analysis.start"
     ANALYSIS_COMPLETE = "analysis.complete"
@@ -46,11 +53,18 @@ ACTION_LABELS: dict[str, tuple[str, str]] = {
     Action.PROJECT_CREATE: ("프로젝트 생성", "프로젝트"),
     Action.PROJECT_UPDATE: ("프로젝트 수정", "프로젝트"),
     Action.PROJECT_DELETE: ("프로젝트 삭제", "삭제"),
+    Action.PROJECT_VISIBILITY_CHANGE: ("프로젝트 가시성 변경", "프로젝트"),
+    Action.PROJECT_MEMBER_INVITE: ("멤버 초대", "프로젝트"),
+    Action.PROJECT_MEMBER_REMOVE: ("멤버 제거", "프로젝트"),
+    Action.PROJECT_MEMBER_ACCEPT: ("초대 수락", "프로젝트"),
+    Action.PROJECT_MEMBER_DECLINE: ("초대 거절", "프로젝트"),
     Action.FOLDER_CREATE: ("폴더 생성", "폴더"),
     Action.FOLDER_UPDATE: ("폴더 수정/이동", "폴더"),
     Action.FOLDER_DELETE: ("폴더 삭제", "삭제"),
     Action.DOCUMENT_UPLOAD: ("문서 업로드", "업로드"),
     Action.DOCUMENT_DELETE: ("문서 삭제", "삭제"),
+    Action.DOCUMENT_MOVE: ("문서 이동", "문서"),
+    Action.DOCUMENT_FOLDER_CHANGE: ("문서 폴더 변경", "문서"),
     Action.CORRECTIONS_APPLY: ("교정 적용", "교정"),
 }
 

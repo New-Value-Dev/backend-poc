@@ -6,14 +6,19 @@ from app.api.deps import get_current_user
 from app.models.user import User
 from app.schemas.dashboard import ActivityItem, DashboardSummary
 from app.services.dashboard_service import DashboardService, get_dashboard_service
-from app.services.project_service import ProjectNotFoundError
+from app.services.project_service import (
+    ProjectForbiddenError,
+    ProjectNotFoundError,
+    ProjectService,
+    get_project_service,
+)
 
 router = APIRouter(tags=["dashboard"])
 
 ProjectScopeQuery = Annotated[
     int | None,
     Query(
-        description="지정 시 해당 프로젝트만 집계. 생략하면 전체. 없는 id 면 404",
+        description="지정 시 해당 프로젝트만 집계. 생략하면 내가 접근 가능한 전체. 없는 id 면 404",
         examples=[1],
     ),
 ]
@@ -22,6 +27,7 @@ AUTH_RESPONSES = {401: {"description": "토큰 없음/만료/무효"}}
 SCOPE_RESPONSES = {
     **AUTH_RESPONSES,
     404: {"description": "project_id 로 지정한 프로젝트 없음"},
+    403: {"description": "project_id 로 지정한 프로젝트에 접근 권한이 없음"},
 }
 
 
@@ -29,6 +35,24 @@ def _not_found(project_id: int | None) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND, detail=f"Project {project_id} not found"
     )
+
+
+def _resolve_scope(
+    project_id: int | None, projects: ProjectService, current_user: User
+):
+    """`project_id`가 주어지면 접근 권한을 확인하고
+    이 사용자가 접근 가능한 프로젝트 id 목록을 돌려준다 """
+    if project_id is not None:
+        try:
+            projects.check_access(project_id, current_user)
+        except ProjectNotFoundError:
+            raise _not_found(project_id) from None
+        except ProjectForbiddenError:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "이 프로젝트에 접근할 권한이 없습니다"
+            ) from None
+        return None
+    return projects.accessible_project_ids_for(current_user)
 
 
 @router.get(
@@ -41,13 +65,12 @@ def _not_found(project_id: int | None) -> HTTPException:
 def get_dashboard_summary(
     project_id: ProjectScopeQuery = None,
     service: DashboardService = Depends(get_dashboard_service),
-    _: User = Depends(get_current_user),
+    projects: ProjectService = Depends(get_project_service),
+    current_user: User = Depends(get_current_user),
 ) -> DashboardSummary:
-    """홈 대시보드 집계를 돌려준다"""
-    try:
-        return service.get_summary(project_id=project_id)
-    except ProjectNotFoundError:
-        raise _not_found(project_id) from None
+    """홈 대시보드 집계를 돌려준다 (접근가능한 프로젝트)"""
+    accessible_ids = _resolve_scope(project_id, projects, current_user)
+    return service.get_summary(project_id=project_id, accessible_project_ids=accessible_ids)
 
 
 @router.get(
@@ -74,10 +97,14 @@ def list_activity(
         ),
     ] = None,
     service: DashboardService = Depends(get_dashboard_service),
-    _: User = Depends(get_current_user),
+    projects: ProjectService = Depends(get_project_service),
+    current_user: User = Depends(get_current_user),
 ) -> list[ActivityItem]:
     """최근 활동을 최신순으로 돌려준다"""
-    try:
-        return service.get_activity(limit=limit, project_id=project_id, action=action)
-    except ProjectNotFoundError:
-        raise _not_found(project_id) from None
+    accessible_ids = _resolve_scope(project_id, projects, current_user)
+    return service.get_activity(
+        limit=limit,
+        project_id=project_id,
+        action=action,
+        accessible_project_ids=accessible_ids,
+    )

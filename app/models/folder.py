@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, ForeignKey, String
+from sqlalchemy import BigInteger, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -24,6 +24,7 @@ class Folder(CreatedAtMixin, Base):
         BigInteger, ForeignKey("folders.id", ondelete="CASCADE")
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     project: Mapped[Project] = relationship(back_populates="folders")
     parent: Mapped[Folder | None] = relationship(

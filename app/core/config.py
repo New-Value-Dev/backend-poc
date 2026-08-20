@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     proofread_batch_max_sections: int = 40
     proofread_batch_concurrency: int = 4  # 배치 호출 동시 실행 수. 섹션이 많은 문서는 배치가 수십 개로 나뉘어 순차 호출 시 매우 느려짐
 
+    # ── Web Push (VAPID) ──
+    vapid_public_key: str | None = None
+    vapid_private_key: str | None = None
+    vapid_claims_email: str = "mailto:admin@example.com"
+
 
 @lru_cache
 def get_settings() -> Settings:

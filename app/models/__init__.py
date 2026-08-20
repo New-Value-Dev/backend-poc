@@ -13,12 +13,16 @@ from app.models.document_section import DocumentSection
 from app.models.document_version import DocumentVersion
 from app.models.embedding_model import EmbeddingModel
 from app.models.folder import Folder
+from app.models.notification import Notification
 from app.models.project import Project
+from app.models.project_member import ProjectMember
+from app.models.push_subscription import PushSubscription
 from app.models.user import User
 
 __all__ = [
     "User",
     "Project",
+    "ProjectMember",
     "Folder",
     "Document",
     "DocumentVersion",
@@ -28,4 +32,6 @@ __all__ = [
     "ChunkEmbedding",
     "AiAnalysisResult",
     "ActivityLog",
+    "PushSubscription",
+    "Notification",
 ]

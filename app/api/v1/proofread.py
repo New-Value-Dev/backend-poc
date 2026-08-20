@@ -26,7 +26,12 @@ from app.services.correction_service import (
     UnsupportedFileTypeError,
     get_correction_service,
 )
-from app.services.document_service import DocumentNotFoundError, VersionNotFoundError
+from app.services.document_service import (
+    DocumentNotFoundError,
+    DocumentService,
+    VersionNotFoundError,
+    get_document_service,
+)
 from app.services.parsing_service import run_parse_task
 from app.services.proofread_service import (
     AnalysisNotCompletedError,
@@ -38,6 +43,12 @@ from app.services.proofread_service import (
     get_proofread_service,
     run_proofread_task,
 )
+from app.services.project_service import (
+    ProjectForbiddenError,
+    ProjectNotFoundError,
+    ProjectService,
+    get_project_service,
+)
 
 router = APIRouter(tags=["ai-proofread"])
 
@@ -48,6 +59,32 @@ AnalysisIdPath = Annotated[
 ]
 
 AUTH_RESPONSES = {401: {"description": "토큰 없음/만료/무효"}}
+FORBIDDEN_RESPONSE = {403: {"description": "이 문서가 속한 프로젝트에 접근할 권한이 없음"}}
+
+
+def check_document_access(
+    document_id: DocumentIdPath,
+    service: DocumentService = Depends(get_document_service),
+    projects: ProjectService = Depends(get_project_service),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """documents.py 의 동명 dependency와 같은 역할"""
+    try:
+        doc = service.get_document(document_id)
+    except DocumentNotFoundError:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Document {document_id} not found"
+        ) from None
+    try:
+        projects.check_access(doc.project_id, current_user)
+    except ProjectForbiddenError:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "이 문서에 접근할 권한이 없습니다"
+        ) from None
+    except ProjectNotFoundError:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Document {document_id} not found"
+        ) from None
 
 
 @router.post(
@@ -60,6 +97,7 @@ AUTH_RESPONSES = {401: {"description": "토큰 없음/만료/무효"}}
         **AUTH_RESPONSES,
         404: {"description": "문서가 없거나 저장된 버전이 없음"},
         409: {"description": "아직 파싱이 끝나지 않아 검사할 섹션이 없음"},
+        **FORBIDDEN_RESPONSE,
     },
 )
 def proofread_document(
@@ -67,6 +105,7 @@ def proofread_document(
     background_tasks: BackgroundTasks,
     service: ProofreadService = Depends(get_proofread_service),
     current_user: User = Depends(get_current_user),
+    _: None = Depends(check_document_access),
 ) -> ProofreadResult:
     """교정을 시작하고 즉시 202와 RUNNING 레코드를 반환한다. 실제 GPT 호출은 백그라운드에서 진행되며 결과는 분석 상세 조회를 폴링해 확인한다"""
     try:
@@ -91,7 +130,7 @@ def proofread_document(
     response_model=list[AnalysisSummary],
     summary="AI 분석 이력",
     response_description="최신순 메타 목록(결과 본문은 빠져 있다)",
-    responses={**AUTH_RESPONSES, 404: {"description": "문서 없음"}},
+    responses={**AUTH_RESPONSES, 404: {"description": "문서 없음"}, **FORBIDDEN_RESPONSE},
 )
 def list_analyses(
     document_id: DocumentIdPath,
@@ -106,7 +145,7 @@ def list_analyses(
         ),
     ] = None,
     service: ProofreadService = Depends(get_proofread_service),
-    _: User = Depends(get_current_user),
+    _: None = Depends(check_document_access),
 ) -> list[AnalysisSummary]:
     """이 문서에 대해 실행된 AI 분석 목록을 최신순으로 돌려준다. 결과 본문 없이 메타 정보만 담긴다"""
     try:
@@ -122,13 +161,13 @@ def list_analyses(
     response_model=ProofreadResult,
     summary="분석 결과 상세 (폴링용)",
     response_description="`status` + 완료 시 `findings`",
-    responses={**AUTH_RESPONSES, 404: {"description": "해당 분석 없음"}},
+    responses={**AUTH_RESPONSES, 404: {"description": "해당 분석 없음"}, **FORBIDDEN_RESPONSE},
 )
 def get_analysis(
     document_id: DocumentIdPath,
     analysis_id: AnalysisIdPath,
     service: ProofreadService = Depends(get_proofread_service),
-    _: User = Depends(get_current_user),
+    _: None = Depends(check_document_access),
 ) -> ProofreadResult:
     """분석 결과를 조회한다. 교정 시작 후 이걸 폴링해 완료를 감지한다"""
     try:
@@ -153,6 +192,7 @@ FindingIdPath = Annotated[
         **AUTH_RESPONSES,
         404: {"description": "분석 또는 finding 없음"},
         409: {"description": "분석이 아직 완료되지 않음"},
+        **FORBIDDEN_RESPONSE,
     },
 )
 def update_finding_status(
@@ -161,7 +201,7 @@ def update_finding_status(
     finding_id: FindingIdPath,
     body: FindingStatusUpdate,
     service: ProofreadService = Depends(get_proofread_service),
-    _: User = Depends(get_current_user),
+    _: None = Depends(check_document_access),
 ) -> ProofreadResult:
     """finding 하나를 accepted/rejected/pending 으로 표시한다. apply 는 accepted 상태만 반영한다"""
     try:
@@ -189,6 +229,7 @@ def update_finding_status(
         400: {"description": "지원하지 않는 파일 형식이거나 승인된 finding이 없음/전부 매칭 실패"},
         404: {"description": "분석 없음"},
         409: {"description": "분석이 미완료 상태이거나 이미 적용됨"},
+        **FORBIDDEN_RESPONSE,
     },
 )
 def apply_corrections(
@@ -197,7 +238,7 @@ def apply_corrections(
     background_tasks: BackgroundTasks,
     corrections: CorrectionService = Depends(get_correction_service),
     activity: ActivityService = Depends(get_activity_service),
-    _: User = Depends(get_current_user),
+    _: None = Depends(check_document_access),
 ) -> ApplyCorrectionsResponse:
     """accepted 상태인 finding들을 DOCX/HWPX는 실제 편집, PDF는 시각적 패치로 반영해
     새 문서 버전을 만들고, 반영된 파일을 다시 파싱/청킹하도록 백그라운드 작업을 건다"""
