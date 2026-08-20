@@ -25,19 +25,29 @@ class DashboardRepository:
 
     # ── 카운트 ──
 
-    def count_projects(self, project_id: int | None = None) -> int:
+    def count_projects(
+        self, project_id: int | None = None, created_by: str | None = None
+    ) -> int:
         stmt = select(func.count()).select_from(Project)
         if project_id is not None:
             stmt = stmt.where(Project.id == project_id)
+        if created_by is not None:
+            stmt = stmt.where(Project.created_by == created_by)
         return self.db.scalar(stmt) or 0
 
-    def count_documents(self, project_id: int | None = None) -> int:
+    def count_documents(
+        self, project_id: int | None = None, created_by: str | None = None
+    ) -> int:
         stmt = self._scope(select(func.count()).select_from(Document), project_id)
+        if created_by is not None:
+            stmt = stmt.where(Document.created_by == created_by)
         return self.db.scalar(stmt) or 0
 
     # ── 파이프라인 / 유형 분포 ──
 
-    def pipeline_counts(self, project_id: int | None = None) -> list[tuple[str, int]]:
+    def pipeline_counts(
+        self, project_id: int | None = None, created_by: str | None = None
+    ) -> list[tuple[str, int]]:
         """문서의 '현재 버전' processing_status 별 문서 수"""
         status = func.coalesce(DocumentVersion.processing_status, "UPLOADED").label(
             "status"
@@ -48,7 +58,10 @@ class DashboardRepository:
             .outerjoin(DocumentVersion, Document.current_version_id == DocumentVersion.id)
             .group_by(status)
         )
-        return [(row.status, row.count) for row in self.db.execute(self._scope(stmt, project_id))]
+        stmt = self._scope(stmt, project_id)
+        if created_by is not None:
+            stmt = stmt.where(Document.created_by == created_by)
+        return [(row.status, row.count) for row in self.db.execute(stmt)]
 
     def document_type_counts(
         self, project_id: int | None = None

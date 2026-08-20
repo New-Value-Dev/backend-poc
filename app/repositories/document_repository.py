@@ -59,6 +59,29 @@ class DocumentRepository:
             stmt = stmt.where(Document.project_id == project_id)
         return list(self.db.execute(stmt))
 
+    def search(self, q: str, *, limit: int) -> list[Row]:
+        """이름/설명에 키워드가 포함된 문서를 프로젝트를 가로질러 검색 (대소문자 무시)"""
+        pattern = f"%{q}%"
+        stmt = (
+            select(
+                Document.id,
+                Document.name,
+                Document.project_id,
+                Project.name.label("project_name"),
+                func.coalesce(
+                    DocumentVersion.processing_status, "UPLOADED"
+                ).label("processing_status"),
+                Document.created_at,
+            )
+            .select_from(Document)
+            .join(Project, Project.id == Document.project_id)
+            .outerjoin(DocumentVersion, Document.current_version_id == DocumentVersion.id)
+            .where(Document.name.ilike(pattern) | Document.description.ilike(pattern))
+            .order_by(Document.created_at.desc(), Document.id.desc())
+            .limit(limit)
+        )
+        return list(self.db.execute(stmt))
+
     def get(self, document_id: int) -> Document | None:
         return self.db.get(Document, document_id)
 

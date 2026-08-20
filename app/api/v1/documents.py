@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse
 
 from app.api.deps import get_current_user
 from app.models.user import User
+from app.schemas.diff import DiffResult
 from app.schemas.document import (
     ChunkRead,
     DocumentRead,
@@ -31,6 +32,7 @@ from app.services.activity_service import (
     ActivityService,
     get_activity_service,
 )
+from app.services.diff_service import DiffService, get_diff_service
 from app.services.document_service import (
     DocumentNotFoundError,
     DocumentService,
@@ -188,6 +190,24 @@ def list_recent_documents(
 
 
 @router.get(
+    "/documents/search",
+    response_model=list[RecentDocumentRead],
+    summary="문서 검색 (프로젝트 교차)",
+    response_description="이름·설명에 키워드가 포함된 문서를 최신순으로",
+    responses=AUTH_RESPONSES,
+)
+def search_documents(
+    q: Annotated[str, Query(min_length=1, description="검색어. 문서 이름/설명에서 찾는다")],
+    limit: Annotated[int, Query(ge=1, le=50, description="가져올 최대 건수")] = 20,
+    service: DocumentService = Depends(get_document_service),
+    _: User = Depends(get_current_user),
+) -> list[RecentDocumentRead]:
+    """전역 검색창(문서 검색)용. `/documents/recent`와 응답 shape은 같지만 최신순이 아니라
+    키워드 매칭 기준이다."""
+    return service.search_documents(q, limit=limit)
+
+
+@router.get(
     "/documents/{document_id}",
     response_model=DocumentRead,
     summary="문서 상세",
@@ -223,6 +243,29 @@ def list_versions(
         return service.list_versions(document_id)
     except DocumentNotFoundError:
         raise _not_found(f"Document {document_id} not found") from None
+
+
+@router.get(
+    "/documents/{document_id}/diff",
+    response_model=DiffResult,
+    summary="버전 비교",
+    response_description="섹션 단위 added/deleted/modified/unchanged + 토큰 단위 diff",
+    responses={**AUTH_RESPONSES, 404: {"description": "버전이 없거나 이 문서 소속이 아님"}},
+)
+def get_document_diff(
+    document_id: DocumentIdPath,
+    from_version_id: Annotated[int, Query(description="비교 기준(이전) 버전 id")],
+    to_version_id: Annotated[int, Query(description="비교 대상(이후) 버전 id")],
+    service: DiffService = Depends(get_diff_service),
+    _: User = Depends(get_current_user),
+) -> DiffResult:
+    """두 버전의 섹션을 정렬해 비교한다. 검색이 아니라 이미 정해진 두 버전만 비교하는
+    문제라 임베딩/LLM 없이 동기로 즉시 계산해 돌려준다. `tokens`를 순서대로 이어붙이면
+    git diff처럼 삭제/추가/유지 구간을 그대로 렌더링할 수 있다."""
+    try:
+        return service.get_diff(document_id, from_version_id, to_version_id)
+    except VersionNotFoundError as exc:
+        raise _not_found(f"Version {exc.version_id} not found or not in this document") from None
 
 
 @router.get(

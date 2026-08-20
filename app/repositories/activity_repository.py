@@ -33,12 +33,15 @@ class ActivityLogRepository:
         limit: int,
         project_id: int | None = None,
         action: str | None = None,
+        actor_id: int | None = None,
     ) -> list[ActivityLog]:
         stmt = select(ActivityLog)
         if project_id is not None:
             stmt = stmt.where(ActivityLog.project_id == project_id)
         if action is not None:
             stmt = stmt.where(ActivityLog.action == action)
+        if actor_id is not None:
+            stmt = stmt.where(ActivityLog.actor_id == actor_id)
         # created_at 만으로는 같은 초에 들어온 행의 순서가 흔들려서 id 를 tiebreaker 로 쓴다.
         stmt = stmt.order_by(ActivityLog.created_at.desc(), ActivityLog.id.desc())
         return list(self.db.scalars(stmt.limit(limit)))

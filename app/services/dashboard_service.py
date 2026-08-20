@@ -100,11 +100,16 @@ class DashboardService:
         limit: int = 10,
         project_id: int | None = None,
         action: str | None = None,
+        actor_id: int | None = None,
     ) -> list[ActivityItem]:
-        """activity_logs 를 최신순으로 읽어 표시용으로 풀어 줌"""
+        """activity_logs 를 최신순으로 읽어 표시용으로 풀어 줌.
+
+        actor_id 는 공개 /activity 라우트에는 노출하지 않고, MyPageService 가
+        "내 활동"만 걸러낼 때 내부적으로 재사용한다.
+        """
         self._ensure_project(project_id)
         logs = self.activity_logs.list_recent(
-            limit=limit, project_id=project_id, action=action
+            limit=limit, project_id=project_id, action=action, actor_id=actor_id
         )
 
         ids_by_type: dict[str, set[int]] = defaultdict(set)

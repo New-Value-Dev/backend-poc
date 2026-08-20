@@ -114,6 +114,23 @@ class DocumentService:
             for row in self.documents.list_recent(limit=limit, project_id=project_id)
         ]
 
+    def search_documents(self, q: str, *, limit: int) -> list[RecentDocumentRead]:
+        """전역 검색창용 — 이름/설명 키워드로 프로젝트를 가로질러 검색"""
+        q = q.strip()
+        if not q:
+            return []
+        return [
+            RecentDocumentRead(
+                id=row.id,
+                name=row.name,
+                project_id=row.project_id,
+                project_name=row.project_name,
+                processing_status=row.processing_status,
+                created_at=row.created_at,
+            )
+            for row in self.documents.search(q, limit=limit)
+        ]
+
     def get_document(self, document_id: int) -> Document:
         doc = self.documents.get(document_id)
         if doc is None:
