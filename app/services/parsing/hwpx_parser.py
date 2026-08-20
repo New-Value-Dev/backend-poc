@@ -41,6 +41,21 @@ def text_excluding_tables(elem: ET.Element) -> str:
     return "".join(t.text or "" for t in iter_t_nodes(elem)).strip()
 
 
+def iter_table_cells(tbl_elem: ET.Element):
+    """tbl_elem 하위 표의 셀(<hp:tc>) 엘리먼트를 행 우선 순서로 yield.
+
+    correction_service 가 셀 단위로 원문을 찾아 그 셀 안에서만 고쳐 쓸 수 있도록
+    셀 엘리먼트를 그대로 준다 (셀 안 텍스트 노드는 iter_t_nodes 로 별도로 얻는다).
+    table_text() 와 동일한 tr/tc 순회 규칙을 쓴다.
+    """
+    for tr in tbl_elem.iter():
+        if _local(tr.tag) != "tr":
+            continue
+        for tc in tr:
+            if _local(tc.tag) == "tc":
+                yield tc
+
+
 def table_text(tbl_elem: ET.Element) -> str:
     rows: list[str] = []
     for tr in tbl_elem.iter():

@@ -5,7 +5,9 @@ from app.services.parsing.docx_parser import DocxParser
 from app.services.parsing.hwpx_parser import HwpxParser
 from app.services.parsing.ocr import TesseractProvider
 from app.services.parsing.pdf_parser import PdfParser
+from app.services.parsing.pptx_parser import PptxParser
 from app.services.parsing.text_parser import TextParser
+from app.services.parsing.xlsx_parser import XlsxParser
 
 # OCR provider 는 한 번만 만들어 PDF 파서에 주입
 _ocr = TesseractProvider(lang="kor+eng")
@@ -15,6 +17,8 @@ _PARSERS: list[DocumentParser] = [
     DocxParser(),
     PdfParser(ocr=_ocr),
     HwpxParser(),
+    PptxParser(),
+    XlsxParser(),
 ]
 
 _BY_EXT: dict[str, DocumentParser] = {

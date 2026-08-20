@@ -1,8 +1,10 @@
 """승인된 proofread finding을 원본 파일에 반영해 새 버전을 만든다.
 
 포맷별 담당:
-- DOCX/HWPX: 실제 텍스트 편집. run/텍스트노드 경계를 인식하는 부분 치환으로
-  구간 밖 서식은 건드리지 않는다 (_replace_span_in_nodes).
+- DOCX/HWPX/PPTX: 실제 텍스트 편집. run/텍스트노드 경계를 인식하는 부분 치환으로
+  구간 밖 서식은 건드리지 않는다 (_replace_span_in_nodes). 표 섹션은 원문이 들어있는
+  셀 하나만 찾아 그 안에서 치환한다(_apply_*_table_cell) — 셀 경계를 넘어서는
+  span은 애초에 찾지 않으므로 다른 셀 데이터가 섞일 일이 없다.
 - PDF: 완전 편집이 불가능하므로 bbox 자리를 redact 후 텍스트를 다시 그려 넣는
   시각적 패치. 다시 그려 넣은 텍스트도 실제 텍스트 레이어라 재파싱하면 반영된다.
 - TXT/MD: 서식 구조가 없어 블록 단위 문자열 치환으로 충분하다.
@@ -24,6 +26,7 @@ from docx import Document as load_docx
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from fastapi import Depends
+from pptx import Presentation
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -42,8 +45,11 @@ from app.services.document_service import (
 from app.services.parsing.base import ParseError
 from app.services.parsing.docx_parser import iter_block_items
 from app.services.parsing.docx_parser import table_text as docx_table_text
-from app.services.parsing.hwpx_parser import SECTION_RE, iter_body_blocks, iter_t_nodes
+from app.services.parsing.hwpx_parser import SECTION_RE, iter_body_blocks, iter_t_nodes, iter_table_cells
+from app.services.parsing.hwpx_parser import table_text as hwpx_table_text
 from app.services.parsing.hwpx_parser import text_excluding_tables as hwpx_text
+from app.services.parsing.pptx_parser import iter_slide_blocks
+from app.services.parsing.pptx_parser import table_text as pptx_table_text
 from app.services.parsing.text_parser import BLANK_LINE_RE
 from app.services.proofread_service import AnalysisNotCompletedError, AnalysisNotFoundError, rehydrate_findings
 from app.services.storage import LocalStorageProvider, StorageProvider
@@ -112,6 +118,36 @@ def _replace_span_in_nodes(nodes: list, original: str, suggestion: str) -> bool:
     return True
 
 
+def _apply_docx_table_cell(table: Table, original: str, suggestion: str) -> bool:
+    """표 전체가 아니라 원문을 담고 있는 셀 하나만 찾아 그 안에서 치환한다.
+
+    셀 경계를 넘어 span을 찾으면 엉뚱한 셀 데이터가 섞일 수 있어, 셀 단위로 먼저
+    좁혀서 _replace_span_in_nodes 를 적용한다(첫 매치만 반영, 나머지는 그대로 둠).
+    """
+    for row in table.rows:
+        for cell in row.cells:
+            nodes = [run for paragraph in cell.paragraphs for run in paragraph.runs]
+            if _replace_span_in_nodes(nodes, original, suggestion):
+                return True
+    return False
+
+
+def _apply_hwpx_table_cell(tbl_elem: ET.Element, original: str, suggestion: str) -> bool:
+    for tc in iter_table_cells(tbl_elem):
+        if _replace_span_in_nodes(list(iter_t_nodes(tc)), original, suggestion):
+            return True
+    return False
+
+
+def _apply_pptx_table_cell(table, original: str, suggestion: str) -> bool:
+    for row in table.rows:
+        for cell in row.cells:
+            nodes = [run for paragraph in cell.text_frame.paragraphs for run in paragraph.runs]
+            if _replace_span_in_nodes(nodes, original, suggestion):
+                return True
+    return False
+
+
 def _group_by_section(
     accepted: list[ProofreadFindingRead], skipped: list[str]
 ) -> dict[int, list[ProofreadFindingRead]]:
@@ -158,7 +194,16 @@ def _apply_docx(
         block = blocks[section.order_no]
 
         if isinstance(block, Table):
-            skipped.extend(f"finding {f.id}: 표 섹션은 apply 미지원" for f in section_findings)
+            if docx_table_text(block).strip() != _expected_text(section).strip():
+                skipped.extend(
+                    f"finding {f.id}: 표 텍스트가 분석 시점과 달라짐" for f in section_findings
+                )
+                continue
+            for f in section_findings:
+                if _apply_docx_table_cell(block, f.original, f.suggestion):
+                    applied += 1
+                else:
+                    skipped.append(f"finding {f.id}: 원문 '{f.original}'을 찾지 못함")
             continue
 
         if block.text.strip() != _expected_text(section).strip():
@@ -217,7 +262,17 @@ def _apply_hwpx(
         name, elem, kind = blocks[section.order_no]
 
         if kind == "tbl":
-            skipped.extend(f"finding {f.id}: 표 섹션은 apply 미지원" for f in section_findings)
+            if hwpx_table_text(elem).strip() != _expected_text(section).strip():
+                skipped.extend(
+                    f"finding {f.id}: 표 텍스트가 분석 시점과 달라짐" for f in section_findings
+                )
+                continue
+            for f in section_findings:
+                if _apply_hwpx_table_cell(elem, f.original, f.suggestion):
+                    applied += 1
+                    modified_files.add(name)
+                else:
+                    skipped.append(f"finding {f.id}: 원문 '{f.original}'을 찾지 못함")
             continue
 
         if hwpx_text(elem).strip() != _expected_text(section).strip():
@@ -244,6 +299,62 @@ def _apply_hwpx(
                 data = original_bytes[name]
             # info(ZipInfo)를 그대로 재사용해 원본 compress_type/순서를 보존한다.
             out.writestr(info, data)
+    return buf.getvalue(), applied, skipped
+
+
+def _apply_pptx(
+    path: Path, accepted: list[ProofreadFindingRead], sections: dict[int, DocumentSection]
+) -> tuple[bytes, int, list[str]]:
+    prs = Presentation(str(path))
+    blocks: list[tuple[str, object]] = [
+        (kind, obj) for kind, obj, _text, _slide_index in iter_slide_blocks(prs)
+    ]
+
+    applied = 0
+    skipped: list[str] = []
+    by_section = _group_by_section(accepted, skipped)
+
+    for section_id, section_findings in by_section.items():
+        section = sections.get(section_id)
+        if section is None:
+            skipped.extend(f"finding {f.id}: section {section_id} 없음" for f in section_findings)
+            continue
+        if section.order_no >= len(blocks):
+            skipped.extend(
+                f"finding {f.id}: order {section.order_no} 범위 밖" for f in section_findings
+            )
+            continue
+        kind, obj = blocks[section.order_no]
+
+        if kind == "table":
+            table = obj
+            if pptx_table_text(table).strip() != _expected_text(section).strip():
+                skipped.extend(
+                    f"finding {f.id}: 표 텍스트가 분석 시점과 달라짐" for f in section_findings
+                )
+                continue
+            for f in section_findings:
+                if _apply_pptx_table_cell(table, f.original, f.suggestion):
+                    applied += 1
+                else:
+                    skipped.append(f"finding {f.id}: 원문 '{f.original}'을 찾지 못함")
+            continue
+
+        paragraph = obj
+        if paragraph.text.strip() != _expected_text(section).strip():
+            skipped.extend(
+                f"finding {f.id}: 문단 텍스트가 분석 시점과 달라짐" for f in section_findings
+            )
+            continue
+
+        for f in section_findings:
+            if _replace_span_in_nodes(paragraph.runs, f.original, f.suggestion):
+                applied += 1
+            else:
+                skipped.append(f"finding {f.id}: 원문 '{f.original}'을 찾지 못함")
+
+    buf = io.BytesIO()
+    prs.save(buf)
     return buf.getvalue(), applied, skipped
 
 
@@ -401,6 +512,7 @@ def _apply_text(
 _APPLY_DISPATCH = {
     "docx": _apply_docx,
     "hwpx": _apply_hwpx,
+    "pptx": _apply_pptx,
     "pdf": _apply_pdf,
     "txt": _apply_text,
     "md": _apply_text,
