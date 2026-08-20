@@ -6,11 +6,19 @@ from collections.abc import Iterable, Sequence
 
 import httpx
 
-from app.services.llm.base import LLMConfigError, LLMError, ProofreadFinding
+from app.services.llm.base import (
+    LLMConfigError,
+    LLMError,
+    ProofreadFinding,
+    RagAnswerDraft,
+    RagContextChunk,
+)
 from app.services.llm.prompts import (
     KNOWN_CATEGORIES,
     proofread_batch_system,
     proofread_system,
+    rag_answer_system,
+    rag_context_block,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +75,20 @@ class OpenAILLMProvider:
                 continue
             out[idx] = self._to_findings(item.get("findings", []))
         return out
+
+    def answer_with_citations(
+        self, question: str, contexts: list[RagContextChunk]
+    ) -> RagAnswerDraft:
+        if not contexts:
+            return RagAnswerDraft(answer="문서에서 근거를 찾지 못했습니다.", used_indices=[])
+        user = f"질문: {question}\n\n{rag_context_block(contexts)}"
+        content = self._chat(rag_answer_system(), user)
+        data = self._load_json(content)
+        answer = str(data.get("answer", "")).strip() or "문서에서 근거를 찾지 못했습니다."
+        raw_idx = data.get("used_indices", [])
+        valid = {c.index for c in contexts}
+        used = [i for i in raw_idx if isinstance(i, int) and i in valid]
+        return RagAnswerDraft(answer=answer, used_indices=used)
 
     # ── 내부 ──
 

@@ -14,6 +14,7 @@ from app.models.document_version import DocumentVersion
 from app.models.embedding_model import EmbeddingModel
 from app.models.folder import Folder
 from app.models.project import Project
+from app.models.rag_query import RagQuery
 from app.models.user import User
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "ChunkEmbedding",
     "AiAnalysisResult",
     "ActivityLog",
+    "RagQuery",
 ]
