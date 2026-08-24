@@ -31,10 +31,7 @@ class XlsxParser:
     extensions = ("xlsx",)
 
     def parse(self, path: Path) -> UnifiedDocument:
-        # data_only: 수식이 아니라 마지막에 저장된 계산값을 읽는다 (엑셀에서 열어 저장한 적 없는
-        # 파일은 캐시된 값이 없어 수식 문자열이 그대로 나올 수 있음 — openpyxl 자체 한계).
-        # read_only: 대용량 시트 메모리 절약.
-        wb = load_workbook(str(path), data_only=True, read_only=True)
+        wb = load_workbook(str(path), data_only=True, read_only=False)
         try:
             sections: list[UnifiedSection] = []
             order = 0

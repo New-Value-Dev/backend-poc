@@ -40,10 +40,49 @@ def _heading_level(style_name: str | None) -> int | None:
     return None
 
 
+_HEADING_MIN_PT = 14.0
+_HEADING_BOLD_MIN_PT = 12.0
+_HEADING_MAX_CHARS = 120
+
+
+def _paragraph_max_size_pt(paragraph: Paragraph) -> float | None:
+    sizes = [
+        run.font.size.pt
+        for run in paragraph.runs
+        if run.text.strip() and run.font.size is not None
+    ]
+    return max(sizes) if sizes else None
+
+
+def _paragraph_is_bold(paragraph: Paragraph) -> bool:
+    runs = [run for run in paragraph.runs if run.text.strip()]
+    return bool(runs) and all(run.bold for run in runs)
+
+
+def _heading_level_by_font(paragraph: Paragraph, text: str) -> int | None:
+    if len(text) > _HEADING_MAX_CHARS:
+        return None
+    size = _paragraph_max_size_pt(paragraph)
+    if size is None:
+        return None
+    if size >= _HEADING_MIN_PT:
+        return 1
+    if size >= _HEADING_BOLD_MIN_PT and _paragraph_is_bold(paragraph):
+        return 1
+    return None
+
+
 def table_text(table: Table) -> str:
     rows = []
     for row in table.rows:
-        rows.append(" | ".join(cell.text.strip() for cell in row.cells))
+        cells_text = []
+        prev_tc = None
+        for cell in row.cells:
+            if cell._tc is prev_tc:
+                continue
+            prev_tc = cell._tc
+            cells_text.append(cell.text.strip())
+        rows.append(" | ".join(cells_text))
     return "\n".join(rows)
 
 
@@ -62,6 +101,8 @@ class DocxParser:
                 if not text:
                     continue
                 level = _heading_level(block.style.name if block.style else None)
+                if level is None:
+                    level = _heading_level_by_font(block, text)
                 if level is not None:
                     sections.append(
                         UnifiedSection(
