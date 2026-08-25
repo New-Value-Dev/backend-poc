@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.services.llm.base import RagContextChunk
 
 # ── Proofread ──
 KNOWN_CATEGORIES = ("spelling", "spacing", "grammar", "expression")
@@ -75,3 +79,29 @@ def proofread_batch_system(categories: Iterable[str]) -> str:
         f'"category": "{enum}"}}]}}]}}\n'
         "오류가 없는 조각은 findings 를 빈 배열로 두거나 생략한다."
     )
+
+
+# ── RAG 답변 생성 ──
+
+
+def rag_answer_system() -> str:
+    """RAG 답변용 system 프롬프트. user 메시지는 질문 + rag_context_block()."""
+    return (
+        "너는 사내 문서 기반 질의응답 도우미다. 주어진 문서 조각(context)만 근거로 답한다. "
+        "context에 없는 내용은 추측해서 답하지 말고 "
+        "'문서에서 근거를 찾지 못했습니다'라고 답한다.\n"
+        "답변에 실제로 근거로 쓴 context의 번호를 used_indices에 표시한다.\n"
+        "반드시 다음 형태의 JSON 객체 하나만 출력한다(설명 문장 금지):\n"
+        '{"answer": "답변 본문", "used_indices": [0, 2]}'
+    )
+
+
+def rag_context_block(contexts: list[RagContextChunk]) -> str:
+    """proofread_batch 의 [번호] 마커 관례를 그대로 따른다."""
+    parts = []
+    for c in contexts:
+        header = f"[{c.index}] 출처: {c.document_name}"
+        if c.section_title:
+            header += f" > {c.section_title}"
+        parts.append(f"{header}\n{c.content}")
+    return "\n\n".join(parts)

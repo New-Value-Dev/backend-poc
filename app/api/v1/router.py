@@ -9,6 +9,7 @@ from app.api.v1.mypage import router as mypage_router
 from app.api.v1.notifications import router as notifications_router
 from app.api.v1.proofread import router as proofread_router
 from app.api.v1.projects import router as projects_router
+from app.api.v1.rag import router as rag_router
 from app.api.v1.push import router as push_router
 from app.api.v1.users import router as users_router
 
@@ -22,5 +23,6 @@ api_router.include_router(projects_router)
 api_router.include_router(folders_router)
 api_router.include_router(documents_router)
 api_router.include_router(proofread_router)
+api_router.include_router(rag_router)
 api_router.include_router(push_router)
 api_router.include_router(notifications_router)

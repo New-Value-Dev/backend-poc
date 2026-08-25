@@ -46,8 +46,10 @@ class Action:
 
     CORRECTIONS_APPLY = "corrections.apply"
 
+    RAG_QUERY = "rag.query"
 
-# 액션 코드 
+
+# 액션 코드
 ACTION_LABELS: dict[str, tuple[str, str]] = {
     Action.LOGIN: ("로그인", "로그인"),
     Action.PROJECT_CREATE: ("프로젝트 생성", "프로젝트"),
@@ -66,6 +68,7 @@ ACTION_LABELS: dict[str, tuple[str, str]] = {
     Action.DOCUMENT_MOVE: ("문서 이동", "문서"),
     Action.DOCUMENT_FOLDER_CHANGE: ("문서 폴더 변경", "문서"),
     Action.CORRECTIONS_APPLY: ("교정 적용", "교정"),
+    Action.RAG_QUERY: ("질의응답 실행", "RAG"),
 }
 
 ANALYSIS_LABELS: dict[str, tuple[str, str]] = {

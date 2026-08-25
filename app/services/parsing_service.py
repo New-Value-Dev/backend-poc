@@ -108,6 +108,7 @@ def parse_version(db, version_id: int) -> None:
 def run_parse_task(version_id: int) -> None:
     """BackgroundTasks 진입점 — 요청 세션과 분리된 자체 세션을 연다"""
     from app.services.chunking_service import chunk_version
+    from app.services.embedding_service import embed_version
 
     db = SessionLocal()
     try:
@@ -115,5 +116,8 @@ def run_parse_task(version_id: int) -> None:
         version = db.get(DocumentVersion, version_id)
         if version is not None and version.processing_status == "PARSED":
             chunk_version(db, version_id)
+        version = db.get(DocumentVersion, version_id)
+        if version is not None and version.processing_status == "CHUNKED":
+            embed_version(db, version_id)
     finally:
         db.close()

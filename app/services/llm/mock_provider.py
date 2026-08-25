@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app.services.llm.base import ProofreadFinding
+from app.services.llm.base import ProofreadFinding, RagAnswerDraft, RagContextChunk
 
 # 키 없이도 데모가 되도록 하는 아주 단순한 규칙 사전
 # 실제 교정은 OpenAILLMProvider(GPT)가 담당하고 이건 개발/폴백용
@@ -61,3 +61,16 @@ class MockLLMProvider:
     def proofread_batch(self, texts: list[str]) -> list[list[ProofreadFinding]]:
         # 규칙 기반은 호출 비용이 없으므로 각 텍스트를 그대로 처리한다.
         return [self.proofread(t) for t in texts]
+
+    def answer_with_citations(
+        self, question: str, contexts: list[RagContextChunk]
+    ) -> RagAnswerDraft:
+        """OPENAI_API_KEY 없이도 전체 흐름을 테스트할 수 있게 하는 단순 폴백"""
+        if not contexts:
+            return RagAnswerDraft(answer="문서에서 근거를 찾지 못했습니다.", used_indices=[])
+        top = contexts[0]
+        snippet = top.content[:300]
+        return RagAnswerDraft(
+            answer=f"[{top.document_name}] 관련 내용: {snippet}",
+            used_indices=[top.index],
+        )

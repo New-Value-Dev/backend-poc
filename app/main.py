@@ -25,7 +25,7 @@ API_DESCRIPTION = f"""
 
 ### 문서 처리 상태 흐름
 `UPLOADED → PARSING → PARSED → CHUNKING → CHUNKED → EMBEDDING → READY` (실패 시 `FAILED`).
-현재 임베딩(MVP2)이 미구현이라 **`CHUNKED` 가 사실상 종착 상태**입니다.
+업로드 한 번으로 파싱·청킹·임베딩(로컬 KURE-v1)까지 자동으로 이어져 `READY`에 도달합니다.
 
 ### 비동기 작업 규약
 업로드와 AI 분석은 즉시 `202 Accepted` 를 돌려주고 실제 처리는 백그라운드에서 진행합니다.
@@ -74,6 +74,13 @@ TAGS_METADATA = [
         "description": (
             "오탈자 검증(MVP1의 첫 AI 모듈)과 AI 분석 이력 조회. 결과는 모든 AI 모듈이 공유하는 "
             "`ai_analysis_results` 테이블에 적재됩니다."
+        ),
+    },
+    {
+        "name": "rag",
+        "description": (
+            "문서 기반 질의응답. 로컬 임베딩(KURE-v1) → pgvector 벡터 검색 → LLM 답변 생성 "
+            "순으로 동작하며, 단일 활성 모델·순수 벡터 검색 MVP입니다."
         ),
     },
 ]
