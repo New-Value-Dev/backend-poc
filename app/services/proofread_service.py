@@ -26,12 +26,34 @@ from app.services.activity_service import (
 )
 from app.services.document_service import DocumentNotFoundError, VersionNotFoundError
 from app.services.llm import LLMError, LLMProvider, get_llm_provider
+from app.services.notification_service import (
+    NotificationType,
+    notification_service_for,
+)
 
 logger = logging.getLogger(__name__)
 
 ANALYSIS_TYPE = "proofread"
 # 파싱이 끝나 섹션이 존재하는 상태들
 _READY_STATES = {"PARSED", "CHUNKING", "CHUNKED", "EMBEDDING", "READY"}
+
+# 분석 완료/실패 시 알림 문구(알림함 + push)
+_NOTIFY_MESSAGES = {
+    Action.ANALYSIS_COMPLETE: (
+        NotificationType.ANALYSIS_COMPLETE,
+        lambda doc: (
+            "오탈자 검증 완료",
+            f"{doc.name} 문서 검토가 끝났습니다." if doc else "문서 검토가 끝났습니다.",
+        ),
+    ),
+    Action.ANALYSIS_FAIL: (
+        NotificationType.ANALYSIS_FAIL,
+        lambda doc: (
+            "오탈자 검증 실패",
+            f"{doc.name} 문서 검토 중 오류가 발생했습니다." if doc else "문서 검토 중 오류가 발생했습니다.",
+        ),
+    ),
+}
 
 
 class DocumentNotReadyError(Exception):
@@ -243,6 +265,7 @@ def run_proofread_task(analysis_id: int) -> None:
         )
         actor = UserRepository(db).get(actor_id) if actor_id else None
         activity = activity_service_for(db, actor=actor)
+        notifications = notification_service_for(db, settings)
 
         def log_outcome(action: str, **extra) -> None:
             activity.record(
@@ -257,6 +280,21 @@ def run_proofread_task(analysis_id: int) -> None:
                     **extra,
                 },
             )
+            if actor is not None and action in _NOTIFY_MESSAGES:
+                notification_type, message = _NOTIFY_MESSAGES[action]
+                title, body = message(doc)
+                notifications.notify(
+                    actor.id,
+                    type=notification_type,
+                    title=title,
+                    body=body,
+                    url=f"/documents/{record.document_id}" if doc else None,
+                    meta={
+                        "document_id": record.document_id,
+                        "analysis_id": record.id,
+                        "analysis_type": record.analysis_type,
+                    },
+                )
 
         try:
             sections = versions.list_sections(record.document_version_id)

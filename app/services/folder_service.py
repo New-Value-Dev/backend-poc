@@ -5,7 +5,7 @@ from app.core.database import get_db
 from app.models.folder import Folder
 from app.repositories.folder_repository import FolderRepository
 from app.repositories.project_repository import ProjectRepository
-from app.schemas.folder import FolderCreate, FolderUpdate
+from app.schemas.folder import FolderCreate, FolderReorder, FolderUpdate
 from app.services.project_service import ProjectNotFoundError
 
 
@@ -67,6 +67,39 @@ class FolderService:
                 self._ensure_no_cycle(folder.id, new_parent_id)
 
         return self.folders.update(folder, values)
+
+    def reorder_folder(self, folder_id: int, data: FolderReorder) -> list[Folder]:
+        """폴더를 target_index 위치로 옮긴다. parent_id를 주면 다른 폴더 밑으로 이동도 함께 처리한다."""
+        folder = self.get_folder(folder_id)
+        values = data.model_dump(exclude_unset=True)
+
+        new_parent_id = values["parent_id"] if "parent_id" in values else folder.parent_id
+        moving_parent = new_parent_id != folder.parent_id
+        if moving_parent and new_parent_id is not None:
+            if new_parent_id == folder.id:
+                raise FolderValidationError("folder cannot be its own parent")
+            self._validate_parent(folder.project_id, new_parent_id)
+            self._ensure_no_cycle(folder.id, new_parent_id)
+
+        if moving_parent:
+            old_siblings = [
+                f
+                for f in self.folders.list_siblings(folder.project_id, folder.parent_id)
+                if f.id != folder.id
+            ]
+            self.folders.set_ranks(old_siblings)
+            folder.parent_id = new_parent_id
+
+        new_siblings = [
+            f
+            for f in self.folders.list_siblings(folder.project_id, new_parent_id)
+            if f.id != folder.id
+        ]
+        target_index = max(0, min(data.target_index, len(new_siblings)))
+        new_siblings.insert(target_index, folder)
+        self.folders.set_ranks(new_siblings)
+        self.folders.commit()
+        return new_siblings
 
     def delete_folder(self, folder_id: int) -> None:
         folder = self.get_folder(folder_id)

@@ -47,13 +47,19 @@ class DashboardService:
 
     # ── GET /dashboard/summary ──
 
-    def get_summary(self, *, project_id: int | None = None) -> DashboardSummary:
+    def get_summary(
+        self, *, project_id: int | None = None, accessible_project_ids=None
+    ) -> DashboardSummary:
         self._ensure_project(project_id)
-        pipeline = dict(self.repository.pipeline_counts(project_id))
+        pipeline = dict(self.repository.pipeline_counts(project_id, accessible_project_ids=accessible_project_ids))
         return DashboardSummary(
             stats=DashboardStats(
-                projects=self.repository.count_projects(project_id),
-                documents=self.repository.count_documents(project_id),
+                projects=self.repository.count_projects(
+                    project_id, accessible_project_ids=accessible_project_ids
+                ),
+                documents=self.repository.count_documents(
+                    project_id, accessible_project_ids=accessible_project_ids
+                ),
                 processing=sum(
                     count
                     for status, count in pipeline.items()
@@ -62,20 +68,24 @@ class DashboardService:
                 # RAG 는 아직 미구현
                 rag_today=0,
             ),
-            weekly_processing=self._weekly_processing(project_id),
+            weekly_processing=self._weekly_processing(project_id, accessible_project_ids),
             document_types=[
                 DocumentTypeCount(label=doc_type or UNKNOWN_TYPE_LABEL, value=count)
-                for doc_type, count in self.repository.document_type_counts(project_id)
+                for doc_type, count in self.repository.document_type_counts(
+                    project_id, accessible_project_ids=accessible_project_ids
+                )
             ],
             pipeline=self._pipeline_stages(pipeline),
         )
 
-    def _weekly_processing(self, project_id: int | None) -> list[int]:
+    def _weekly_processing(self, project_id: int | None, accessible_project_ids=None) -> list[int]:
         """최근 7일(오늘 포함) 업로드 건수를 과거 → 오늘 순"""
         today = datetime.now(timezone.utc).date()
         start = today - timedelta(days=WEEK_DAYS - 1)
         counts = self.repository.daily_version_counts(
-            datetime.combine(start, time.min, tzinfo=timezone.utc), project_id
+            datetime.combine(start, time.min, tzinfo=timezone.utc),
+            project_id,
+            accessible_project_ids=accessible_project_ids,
         )
         return [counts.get(start + timedelta(days=i), 0) for i in range(WEEK_DAYS)]
 
@@ -101,6 +111,7 @@ class DashboardService:
         project_id: int | None = None,
         action: str | None = None,
         actor_id: int | None = None,
+        accessible_project_ids=None,
     ) -> list[ActivityItem]:
         """activity_logs 를 최신순으로 읽어 표시용으로 풀어 줌.
 
@@ -109,7 +120,11 @@ class DashboardService:
         """
         self._ensure_project(project_id)
         logs = self.activity_logs.list_recent(
-            limit=limit, project_id=project_id, action=action, actor_id=actor_id
+            limit=limit,
+            project_id=project_id,
+            action=action,
+            actor_id=actor_id,
+            accessible_project_ids=accessible_project_ids,
         )
 
         ids_by_type: dict[str, set[int]] = defaultdict(set)

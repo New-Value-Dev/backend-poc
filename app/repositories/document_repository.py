@@ -33,7 +33,11 @@ class DocumentRepository:
         return list(self.db.scalars(stmt.order_by(Document.id.desc())))
 
     def list_recent(
-        self, *, limit: int, project_id: int | None = None
+        self,
+        *,
+        limit: int,
+        project_id: int | None = None,
+        accessible_project_ids=None,
     ) -> list[Row]:
         """최근 등록된 문서를 프로젝트 이름/현재 버전 상태와 함께 조인해서 가져옴"""
         stmt = (
@@ -57,9 +61,11 @@ class DocumentRepository:
         )
         if project_id is not None:
             stmt = stmt.where(Document.project_id == project_id)
+        elif accessible_project_ids is not None:
+            stmt = stmt.where(Document.project_id.in_(accessible_project_ids))
         return list(self.db.execute(stmt))
 
-    def search(self, q: str, *, limit: int) -> list[Row]:
+    def search(self, q: str, *, limit: int, accessible_project_ids=None) -> list[Row]:
         """이름/설명에 키워드가 포함된 문서를 프로젝트를 가로질러 검색 (대소문자 무시)"""
         pattern = f"%{q}%"
         stmt = (
@@ -80,6 +86,8 @@ class DocumentRepository:
             .order_by(Document.created_at.desc(), Document.id.desc())
             .limit(limit)
         )
+        if accessible_project_ids is not None:
+            stmt = stmt.where(Document.project_id.in_(accessible_project_ids))
         return list(self.db.execute(stmt))
 
     def get(self, document_id: int) -> Document | None:

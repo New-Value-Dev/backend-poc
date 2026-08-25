@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     rag_context_max_chars: int = 1200    # LLM에 넘길 chunk당 최대 글자수
     rag_expand_siblings: bool = True     # 같은 조(article_key)의 나머지 청크를 컨텍스트에 같이 넣을지
     rag_expand_max_extra: int = 6        # 형제 확장으로 추가할 청크 최대 개수(비용/길이 억제)
+    # ── Web Push (VAPID) ──
+    vapid_public_key: str | None = None
+    vapid_private_key: str | None = None
+    vapid_claims_email: str = "mailto:admin@example.com"
 
 
 @lru_cache
