@@ -40,5 +40,7 @@ class RagMessage(CreatedAtMixin, Base):
     # 검색된 청크 수 / 왕복 시간 — 품질 회귀를 나중에 되짚어볼 수 있게 남긴다.
     retrieved_count: Mapped[int | None] = mapped_column(Integer)
     latency_ms: Mapped[float | None] = mapped_column(Float)
+    # GPT 자기신고 confidence(0~1) — 검색 유사도와는 다른 축, provider가 값을 안 주거나 형식이 어긋나면 NULL
+    confidence: Mapped[float | None] = mapped_column(Float)
 
     conversation: Mapped[RagConversation] = relationship(back_populates="messages")

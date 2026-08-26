@@ -116,7 +116,12 @@ class OpenAILLMProvider:
                 continue
             if idx in valid and idx not in cited:
                 cited.append(idx)
-        return RagAnswer(answer=answer, cited_indexes=cited)
+
+        confidence = None
+        raw_confidence = data.get("confidence")
+        if isinstance(raw_confidence, (int, float)):
+            confidence = min(1.0, max(0.0, float(raw_confidence)))
+        return RagAnswer(answer=answer, cited_indexes=cited, confidence=confidence)
 
     def answer_with_context_stream(
         self,

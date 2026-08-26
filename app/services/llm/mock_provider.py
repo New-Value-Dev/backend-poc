@@ -78,6 +78,7 @@ class MockLLMProvider:
             return RagAnswer(
                 answer="제공된 문서에서는 확인할 수 없습니다. (mock provider — 검색 결과 없음)",
                 cited_indexes=[],
+                confidence=0.0,
             )
         top = contexts[0]
         excerpt = top.content if len(top.content) <= 300 else top.content[:300] + "…"
@@ -88,6 +89,7 @@ class MockLLMProvider:
                 "실제 자연어 답변은 OPENAI_API_KEY 를 설정하면 GPT가 생성합니다."
             ),
             cited_indexes=[top.index],
+            confidence=0.75,
         )
 
     def answer_with_context_stream(
@@ -98,7 +100,9 @@ class MockLLMProvider:
     ) -> Iterable[str]:
         """실제 provider와 배선을 맞추려고 완성된 답을 단어 단위로 흉내만 내서 흘려보낸다."""
         answer = self.answer_with_context(question, contexts, history)
-        return self._split_words(answer.answer)
+        confidence = answer.confidence if answer.confidence is not None else 0.0
+        text = f"{answer.answer}\n[[CONF:{confidence:.2f}]]"
+        return self._split_words(text)
 
     @staticmethod
     def _split_words(text: str) -> Iterable[str]:

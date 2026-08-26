@@ -16,6 +16,34 @@ from app.services.parsing.ocr import OCRProvider, OCRWord, preprocess_for_ocr
 OCR_DPI = 200
 _MIN_NATIVE_CHARS = 3  # 이보다 텍스트가 적으면 스캔본으로 보고 OCR
 OCR_LOW_CONFIDENCE_THRESHOLD = 60.0  # 이 미만이면 재확인이 필요한 줄로 표시
+_SPACE_GAP_RATIO = 0.2  # span 사이 간격이 폰트 크기의 이 비율보다 커야 실제 공백으로 본다
+
+
+def _block_text(block: dict) -> tuple[str, list[dict]]:
+    """블록의 span들을 이어붙여 텍스트를 만든다. 항상 공백으로 잇지 않고
+    span 사이의 실제 x 간격을 폰트 크기와 비교해 간격이 있을 때만 공백을 넣는다"""
+    parts: list[str] = []
+    all_spans: list[dict] = []
+    prev_end: float | None = None
+    for line in block.get("lines", []):
+        spans = line.get("spans", [])
+        if not spans:
+            continue
+        if prev_end is not None and parts:
+            parts.append(" ")  # 줄바꿈은 항상 공백 취급(문단 내 개행)
+        prev_end = None
+        for s in spans:
+            text = s.get("text", "")
+            if not text:
+                continue
+            x0 = s["bbox"][0]
+            size = s.get("size") or 0.0
+            if prev_end is not None and (x0 - prev_end) > size * _SPACE_GAP_RATIO:
+                parts.append(" ")
+            parts.append(text)
+            prev_end = s["bbox"][2]
+            all_spans.append(s)
+    return "".join(parts).strip(), all_spans
 
 
 class PdfParser:
@@ -74,18 +102,22 @@ class PdfParser:
     def _parse_native_page(self, page, page_no, sections, order) -> int:
         data = page.get_text("dict")
         blocks = [b for b in data.get("blocks", []) if b.get("type") == 0]
+        blocks.sort(key=lambda b: (round(b["bbox"][1], 1), round(b["bbox"][0], 1)))
         sizes = [
             span["size"]
-            for b in blocks for line in b.get("lines", []) for span in line.get("spans", [])
+            for b in blocks
+            for line in b.get("lines", [])
+            for span in line.get("spans", [])
+            if span.get("text", "").strip()
         ]
         body_size = statistics.median(sizes) if sizes else 0.0
 
         for block in blocks:
-            spans = [s for line in block.get("lines", []) for s in line.get("spans", [])]
-            text = " ".join(s["text"] for s in spans).strip()
+            text, spans = _block_text(block)
             if not text:
                 continue
-            max_size = max((s["size"] for s in spans), default=0.0)
+            non_blank_sizes = [s["size"] for s in spans if s.get("text", "").strip()]
+            max_size = max(non_blank_sizes, default=0.0)
             is_heading = (
                 body_size > 0 and max_size >= body_size * 1.3 and len(text) <= 120
             )

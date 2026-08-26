@@ -36,6 +36,7 @@ class Action:
     FOLDER_DELETE = "folder.delete"
 
     DOCUMENT_UPLOAD = "document.upload"
+    DOCUMENT_VERSION_ADD = "document.version_add"
     DOCUMENT_DELETE = "document.delete"
     DOCUMENT_MOVE = "document.move"
     DOCUMENT_FOLDER_CHANGE = "document.folder_change"
@@ -72,6 +73,7 @@ ACTION_LABELS: dict[str, tuple[str, str]] = {
     Action.FOLDER_UPDATE: ("폴더 수정/이동", "폴더"),
     Action.FOLDER_DELETE: ("폴더 삭제", "삭제"),
     Action.DOCUMENT_UPLOAD: ("문서 업로드", "업로드"),
+    Action.DOCUMENT_VERSION_ADD: ("새 버전 추가", "버전"),
     Action.DOCUMENT_DELETE: ("문서 삭제", "삭제"),
     Action.DOCUMENT_MOVE: ("문서 이동", "문서"),
     Action.DOCUMENT_FOLDER_CHANGE: ("문서 폴더 변경", "문서"),

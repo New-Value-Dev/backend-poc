@@ -27,8 +27,14 @@ from app.repositories.rag_repository import (
     RagConversationRepository,
     RagMessageRepository,
 )
-from app.schemas.rag import RagScope
-from app.services.llm.base import LLMError, LLMProvider, RagContext, extract_cited_indexes
+from app.schemas.rag import RagScope, RagStreamErrorCode
+from app.services.llm.base import (
+    LLMError,
+    LLMProvider,
+    RagContext,
+    extract_cited_indexes,
+    strip_confidence_marker,
+)
 from app.services.llm.factory import get_llm_provider
 from app.services.project_service import ProjectService, get_project_service
 from app.services.rag.context import build_contexts
@@ -37,6 +43,13 @@ from app.services.rag.retriever import RetrievalResult, RetrievedChunk, Retrieve
 logger = logging.getLogger(__name__)
 
 TITLE_MAX_CHARS = 120
+
+RAG_STREAM_FALLBACK_MESSAGES = {
+    RagStreamErrorCode.LLM_CALL_FAILED: "답변을 가져오는 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+    RagStreamErrorCode.EMPTY_ANSWER: "질문에 답할 근거를 찾지 못했습니다. 질문을 조금 더 구체적으로 해보시겠어요?",
+}
+
+_CONFIDENCE_MARKER_SAFETY_WINDOW = 32
 
 
 class RagConversationNotFoundError(Exception):
@@ -222,6 +235,7 @@ class RagService:
                 provider=provider.name,
                 retrieved_count=len(result.chunks),
                 latency_ms=round(latency_ms, 1),
+                confidence=answer.confidence,
             )
         )
         self.db.commit()
@@ -324,18 +338,38 @@ class RagService:
             "search_question": ctx.search_question,
         }
 
+        # [n] 인용 마커와 달리 confidence 마커([[CONF:0.xx]])는 사용자에게 보이면 안 되므로,
+        # 스트림 끝부분(_CONFIDENCE_MARKER_SAFETY_WINDOW 만큼)은 즉시 내보내지 않고 버퍼에
+        # 들고 있다가, 다음 델타가 오면 그만큼만 흘려보낸다. 스트림이 끝나면 남은 버퍼에서
+        # 마커를 최종적으로 떼어낸다.
         chunks: list[str] = []
+        pending = ""
         try:
             for delta in ctx.deltas:
-                chunks.append(delta)
-                yield "delta", {"text": delta}
-        except LLMError as exc:
-            yield "error", {"detail": str(exc)}
+                pending += delta
+                overflow = len(pending) - _CONFIDENCE_MARKER_SAFETY_WINDOW
+                if overflow > 0:
+                    to_yield, pending = pending[:overflow], pending[overflow:]
+                    chunks.append(to_yield)
+                    yield "delta", {"text": to_yield}
+        except LLMError:
+            logger.exception(
+                "rag stream: LLM 호출 실패 user=%s conv=%s",
+                ctx.user.id, conversation.id if conversation else None,
+            )
+            code = RagStreamErrorCode.LLM_CALL_FAILED
+            yield "error", {"code": code, "detail": RAG_STREAM_FALLBACK_MESSAGES[code]}
             return
+
+        tail, confidence = strip_confidence_marker(pending)
+        if tail:
+            chunks.append(tail)
+            yield "delta", {"text": tail}
 
         answer_text = "".join(chunks).strip()
         if not answer_text:
-            yield "error", {"detail": "RAG 답변이 비어 있습니다"}
+            code = RagStreamErrorCode.EMPTY_ANSWER
+            yield "error", {"code": code, "detail": RAG_STREAM_FALLBACK_MESSAGES[code]}
             return
 
         valid = {c.index for c in ctx.contexts}
@@ -368,6 +402,7 @@ class RagService:
                 provider=ctx.provider.name,
                 retrieved_count=len(ctx.result.chunks),
                 latency_ms=round(latency_ms, 1),
+                confidence=confidence,
             )
         )
 
@@ -388,6 +423,7 @@ class RagService:
             "provider": ctx.provider.name,
             "retrieved_count": len(ctx.result.chunks),
             "latency_ms": round(latency_ms, 1),
+            "confidence": confidence,
         }
 
     def _history(self, conversation: RagConversation | None) -> list[tuple[str, str]]:
@@ -420,6 +456,18 @@ class RagService:
 
     def get_conversation(self, conversation_id: int, user: User) -> RagConversation:
         return self._own_conversation(conversation_id, user)
+
+    def rename_conversation(self, conversation_id: int, user: User, title: str) -> RagConversation:
+        conversation = self._own_conversation(conversation_id, user)
+        conversation.title = title.strip()[:TITLE_MAX_CHARS]
+        self.db.commit()
+        self.db.refresh(conversation)
+        return conversation
+
+    def delete_conversation(self, conversation_id: int, user: User) -> None:
+        conversation = self._own_conversation(conversation_id, user)
+        self.conversations.delete(conversation)
+        self.db.commit()
 
     def recent_questions(self, user: User, *, limit: int = 10):
         """대시보드/검색 화면용 최근 질의 (본인 질의만)"""

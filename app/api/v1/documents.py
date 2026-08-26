@@ -299,6 +299,51 @@ def list_versions(
     return service.list_versions(doc.id)
 
 
+@router.post(
+    "/documents/{document_id}/versions",
+    response_model=DocumentVersionRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="새 버전 추가 (멀티파트)",
+    response_description="생성된 버전(202). 파싱은 아직 진행 중이다",
+    responses={
+        **AUTH_RESPONSES,
+        400: {"description": "지원하지 않는 확장자 또는 용량 초과"},
+        404: {"description": "문서 없음"},
+        **FORBIDDEN_RESPONSE,
+    },
+)
+async def add_version(
+    background_tasks: BackgroundTasks,
+    file: Annotated[UploadFile, File(description="새 버전으로 등록할 파일")],
+    service: DocumentService = Depends(get_document_service),
+    activity: ActivityService = Depends(get_activity_service),
+    doc: Document = Depends(check_document_access),
+) -> DocumentVersionRead:
+    """기존 문서에 새 버전 추가"""
+    data = await file.read()
+    try:
+        version = service.create_version(
+            doc.id,
+            filename=file.filename or "unnamed",
+            content_type=file.content_type,
+            data=data,
+        )
+    except DocumentValidationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+
+    activity.record(
+        Action.DOCUMENT_VERSION_ADD,
+        project_id=doc.project_id,
+        target_type="document",
+        target_id=doc.id,
+        target_label=version.original_file_name,
+        meta={"version_no": version.version_no, "file_size": version.file_size},
+    )
+
+    background_tasks.add_task(run_parse_task, version.id)
+    return version
+
+
 @router.get(
     "/documents/{document_id}/diff",
     response_model=DiffResult,

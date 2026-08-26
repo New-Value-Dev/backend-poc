@@ -40,6 +40,7 @@ class RagAnswer:
 
     answer: str
     cited_indexes: list[int]
+    confidence: float | None = None
 
 
 @dataclass
@@ -148,3 +149,15 @@ def extract_cited_indexes(text: str, valid_indexes: set[int]) -> list[int]:
         if idx in valid_indexes and idx not in cited:
             cited.append(idx)
     return cited
+
+
+CONFIDENCE_MARKER_RE = re.compile(r"\n?\[\[CONF:([01](?:\.\d{1,2})?)\]\]\s*$")
+
+
+def strip_confidence_marker(text: str) -> tuple[str, float | None]:
+    """텍스트 끝의 `[[CONF:0.xx]]` 마커를 떼어내고 (본문, confidence)를 돌려준다"""
+    match = CONFIDENCE_MARKER_RE.search(text)
+    if not match:
+        return text, None
+    value = min(1.0, max(0.0, float(match.group(1))))
+    return text[: match.start()].rstrip(), value

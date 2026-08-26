@@ -185,6 +185,9 @@ class RagConversationRepository:
             )
         )
 
+    def delete(self, conversation: RagConversation) -> None:
+        self.db.delete(conversation)
+
 
 class RagMessageRepository:
     def __init__(self, db: Session) -> None:

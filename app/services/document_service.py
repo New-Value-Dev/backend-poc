@@ -282,11 +282,11 @@ class DocumentService:
     ) -> DocumentVersion:
         """기존 document 에 새 버전(v2+)을 추가한다. upload_document 와 달리 Document 는 새로 만들지 않는다."""
         document = self.get_document(document_id)
+        ext = self._validate_file(filename, data)
         existing = self.versions.list_by_document(document_id)  # version_no desc
         version_no = (existing[0].version_no + 1) if existing else 1
 
-        ext = filename.rsplit(".", 1)[1].lower() if "." in filename else ""
-        stored_name = f"{uuid.uuid4().hex}.{ext}" if ext else uuid.uuid4().hex
+        stored_name = f"{uuid.uuid4().hex}.{ext}"
         relative_dir = (
             f"documents/project-{document.project_id}/document-{document.id}/v{version_no}"
         )

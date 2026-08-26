@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import logging
+import unicodedata
 import zipfile
 from collections import defaultdict
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ from app.services.document_service import (
 )
 from app.services.parsing.base import ParseError
 from app.services.parsing.docx_parser import iter_block_items
+from app.services.parsing.pdf_parser import _block_text as _pdf_block_text
 from app.services.parsing.docx_parser import table_text as docx_table_text
 from app.services.parsing.hwpx_parser import SECTION_RE, iter_body_blocks, iter_t_nodes, iter_table_cells
 from app.services.parsing.hwpx_parser import table_text as hwpx_table_text
@@ -85,6 +87,25 @@ class ApplyOutcome:
     skipped_reasons: list[str]
 
 
+_MATCH_NORMALIZE_MAP = str.maketrans(
+    {
+        " ": " ", # non-breaking space
+        "　": " ", # 전각 공백
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "–": "-", # en dash
+        "—": "-", # em dash
+    }
+)
+
+
+def _normalize_for_match(s: str) -> str:
+    """GPT가 원문을 그대로 베끼지 않고 공백/따옴표/대시 종류를 바꿔 돌려주는 경우를 흡수"""
+    return unicodedata.normalize("NFC", s).translate(_MATCH_NORMALIZE_MAP)
+
+
 def _replace_span_in_nodes(nodes: list, original: str, suggestion: str) -> bool:
     """nodes를 순서대로 이어붙인 전체 텍스트에서 original을 찾아 suggestion으로 바꾼다.
 
@@ -96,9 +117,17 @@ def _replace_span_in_nodes(nodes: list, original: str, suggestion: str) -> bool:
     texts = [n.text or "" for n in nodes]
     full_text = "".join(texts)
     idx = full_text.find(original)
+    span_len = len(original)
+    if idx == -1:
+        # GPT가 공백/따옴표/대시 종류를 바꿔 인용한 경우를 흡수하는 폴백
+        norm_full = _normalize_for_match(full_text)
+        norm_original = _normalize_for_match(original)
+        if len(norm_full) == len(full_text) and len(norm_original) == len(original):
+            idx = norm_full.find(norm_original)
+            span_len = len(norm_original)
     if idx == -1:
         return False
-    end = idx + len(original)
+    end = idx + span_len
 
     pos = 0
     replaced_first = False
@@ -359,26 +388,91 @@ def _apply_pptx(
 
 
 _MIN_PDF_FONT_SIZE = 6.0
+_LATIN_FALLBACK_FONT = "helv"
+_LINE_HEIGHT_RATIO = 1.8  # insert_textbox 가 실패 없이 그리는 데 필요한 최소 비율(≈1.673)보다 여유를 둔 값
+
+
+def _script_runs(text: str) -> list[tuple[str, bool]]:
+    """텍스트를 한글 구간/비한글 구간으로 쪼갠다"""
+    classes: list[str | None] = []
+    last: str | None = None
+    for ch in text:
+        if ch.isspace():
+            classes.append(last)
+        else:
+            last = "hangul" if "가" <= ch <= "힣" else "other"
+            classes.append(last)
+    fallback = next((c for c in classes if c is not None), "other")
+    classes = [c or fallback for c in classes]
+
+    runs: list[tuple[str, bool]] = []
+    buf: list[str] = []
+    cur: str | None = None
+    for ch, cls in zip(text, classes):
+        if cls != cur and buf:
+            runs.append(("".join(buf), cur == "hangul"))
+            buf = []
+        cur = cls
+        buf.append(ch)
+    if buf:
+        runs.append(("".join(buf), cur == "hangul"))
+    return runs
 
 
 def _insert_textbox_fit(
     page, rect: "fitz.Rect", text: str, fontsize: float, fontname: str = "korea-s", color=(0, 0, 0)
 ) -> None:
-    """rect 에 안 들어가면 폰트를 줄여가며 재시도하고, 최소 크기에서도 안 들어가면
-    rect 세로를 늘려서라도 반드시 그린다.
-
-    `insert_textbox` 는 텍스트가 rect 를 넘치면(음수 반환) **아무것도 그리지 않고
-    조용히 실패**한다 — 반환값을 안 보면 알 수가 없다. 이미 `add_redact_annot` 로
-    원문을 지운 뒤라, 이 실패를 그대로 두면 그 자리가 통째로 빈 칸이 된다.
-    """
+    """텍스트를 한글/비한글 구간별로 나눠 각각 좁은 박스에 따로 그리고, 측정한
+    폭만큼만 가로로 이어붙인다. 폭이 페이지를 넘어가면 우리가 직접 줄바꿈"""
     size = max(fontsize, _MIN_PDF_FONT_SIZE)
-    rc = page.insert_textbox(rect, text, fontsize=size, fontname=fontname, color=color)
-    while rc < 0 and size > _MIN_PDF_FONT_SIZE:
+    max_width = max(rect.width, page.rect.width - rect.x0 - 36.0)
+
+    def _run_font(is_hangul: bool) -> str:
+        return fontname if is_hangul else _LATIN_FALLBACK_FONT
+
+    def _total_width(sz: float) -> float:
+        return sum(
+            fitz.get_text_length(chunk, fontname=_run_font(is_hangul), fontsize=sz) for chunk, is_hangul in runs
+        )
+
+    runs = _script_runs(text)
+    while size > _MIN_PDF_FONT_SIZE and _total_width(size) > max_width:
         size = max(size - 0.5, _MIN_PDF_FONT_SIZE)
-        rc = page.insert_textbox(rect, text, fontsize=size, fontname=fontname, color=color)
-    if rc < 0:
-        grown = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y1 - rc + 2)
-        page.insert_textbox(grown, text, fontsize=size, fontname=fontname, color=color)
+
+    lines: list[list[tuple[str, str, float]]] = [[]]
+    line_width = 0.0
+    for chunk, is_hangul in runs:
+        run_font = _run_font(is_hangul)
+        width = fitz.get_text_length(chunk, fontname=run_font, fontsize=size)
+        if line_width + width > max_width and lines[-1]:
+            lines.append([])
+            line_width = 0.0
+        lines[-1].append((chunk, run_font, width))
+        line_width += width
+
+    line_height = size * _LINE_HEIGHT_RATIO
+    y1 = max(rect.y1, rect.y0 + line_height * len(lines))
+    for i, line in enumerate(lines):
+        x = rect.x0
+        ly0 = rect.y0 + i * line_height
+        ly1 = y1 if i == len(lines) - 1 else ly0 + line_height
+        for chunk, run_font, width in line:
+            run_rect = fitz.Rect(x, ly0, x + width + 2, ly1)
+            page.insert_textbox(run_rect, chunk, fontsize=size, fontname=run_font, color=color)
+            x += width
+
+
+def _pdf_live_text(page, rect: "fitz.Rect") -> str:
+    """clip 영역의 텍스트를 pdf_parser 파싱 시점과 동일한 방식으로 재구성"""
+    data = page.get_text("dict", clip=rect)
+    parts = [
+        text
+        for b in data.get("blocks", [])
+        if b.get("type") == 0
+        for text, _spans in [_pdf_block_text(b)]
+        if text
+    ]
+    return " ".join(parts).strip()
 
 
 def _apply_pdf(
@@ -410,7 +504,7 @@ def _apply_pdf(
             page = doc[page_no - 1]
             rect = fitz.Rect(*bbox)
             expected = _expected_text(section)
-            live_text = page.get_text("text", clip=rect).strip()
+            live_text = _pdf_live_text(page, rect)
             if live_text and expected and live_text not in expected and expected not in live_text:
                 skipped.extend(
                     f"finding {f.id}: 페이지 텍스트가 분석 시점과 달라짐" for f in section_findings

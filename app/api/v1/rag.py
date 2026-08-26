@@ -10,10 +10,12 @@ from app.schemas.rag import (
     RagCitation,
     RagConversationDetail,
     RagConversationRead,
+    RagConversationUpdate,
     RagHistoryItem,
     RagMessageRead,
     RagQueryRequest,
     RagQueryResponse,
+    RagScope,
     RagSearchHit,
     RagSearchRequest,
     RagSearchResponse,
@@ -153,6 +155,7 @@ def query(
         embedding_model=result.embedding_model_key,
         retrieved_count=message.retrieved_count or 0,
         latency_ms=message.latency_ms or 0.0,
+        confidence=message.confidence,
     )
 
 
@@ -181,9 +184,15 @@ def query_stream(
       `search_question`은 후속 질문을 검색 전에 독립 질문으로 재작성한 결과 — 원래 질문과
       같으면(재작성 없었으면) 그냥 원문이 그대로 들어간다.
     - `delta`: `{text}` — 답변 조각. 이어 붙이면 최종 답변이 된다.
-    - `citations`: `{citations}` — `[1]` 표기에서 뽑은 근거 목록(마지막 delta 다음, 한 번)
-    - `done`: `{conversation_id, message_id, provider, retrieved_count, latency_ms}` (마지막)
-    - `error`: `{detail}` — LLM 호출 실패 시(이 이벤트 후 스트림 종료, done 없음)
+    - `citations`: `{citations}` — `[1]` 표기에서 뽑은 근거 목록(마지막 delta 다음, 한 번).
+      각 citation의 `score`는 검색 유사도(정확도)로, GPT 답변과 무관하게 검색 단계에서 정해진다.
+    - `done`: `{conversation_id, message_id, provider, retrieved_count, latency_ms, confidence}`
+      (마지막). `confidence`는 GPT가 스스로 매긴 0~1 신뢰도(자기신고, 값 없으면 null) —
+      citations의 검색 유사도와는 다른 축이다.
+    - `error`: `{code, detail}` — 스트림 도중 실패(이 이벤트 후 스트림 종료, done 없음).
+      `code`(`RagStreamErrorCode`: `llm_call_failed` | `empty_answer`)로 분기하고, `detail`은
+      사용자에게 그대로 보여줄 고정 문구다 — 원인 상세(OpenAI 원본 오류 등)는 서버 로그에만 남고
+      여기엔 절대 노출하지 않는다.
     """
     try:
         ctx = _scope_guard(service.query_stream_prepare)(
@@ -290,6 +299,7 @@ def get_conversation(
         id=conversation.id,
         title=conversation.title,
         project_id=conversation.project_id,
+        scope=RagScope(**conversation.scope) if conversation.scope else None,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
         messages=[
@@ -299,8 +309,67 @@ def get_conversation(
                 content=m.content,
                 citations=[RagCitation(**c) for c in (m.citations or [])] or None,
                 provider=m.provider,
+                confidence=m.confidence,
                 created_at=m.created_at,
             )
             for m in conversation.messages
         ],
     )
+
+
+@router.patch(
+    "/conversations/{conversation_id}",
+    response_model=RagConversationRead,
+    summary="대화 제목 수정",
+    response_description="수정된 대화",
+    responses={
+        **AUTH_RESPONSES,
+        403: {"description": "다른 사용자의 대화"},
+        404: {"description": "대화 없음"},
+    },
+)
+def rename_conversation(
+    conversation_id: int,
+    body: RagConversationUpdate,
+    service: RagService = Depends(get_rag_service),
+    current_user: User = Depends(get_current_user),
+) -> RagConversationRead:
+    try:
+        conversation = service.rename_conversation(conversation_id, current_user, body.title)
+    except RagConversationNotFoundError as exc:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Conversation {exc.conversation_id} not found"
+        ) from None
+    except RagConversationForbiddenError:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "다른 사용자의 대화입니다"
+        ) from None
+    return RagConversationRead.model_validate(conversation)
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="대화 삭제",
+    response_description="대화 + 메시지 전체 삭제",
+    responses={
+        **AUTH_RESPONSES,
+        403: {"description": "다른 사용자의 대화"},
+        404: {"description": "대화 없음"},
+    },
+)
+def delete_conversation(
+    conversation_id: int,
+    service: RagService = Depends(get_rag_service),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    try:
+        service.delete_conversation(conversation_id, current_user)
+    except RagConversationNotFoundError as exc:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Conversation {exc.conversation_id} not found"
+        ) from None
+    except RagConversationForbiddenError:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "다른 사용자의 대화입니다"
+        ) from None
