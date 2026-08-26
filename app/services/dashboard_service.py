@@ -10,6 +10,7 @@ from app.core.database import get_db
 from app.repositories.activity_repository import ActivityLogRepository
 from app.repositories.dashboard_repository import DashboardRepository
 from app.repositories.project_repository import ProjectRepository
+from app.repositories.rag_repository import RagMessageRepository
 from app.schemas.dashboard import (
     ActivityItem,
     DashboardStats,
@@ -35,10 +36,12 @@ class DashboardService:
         repository: DashboardRepository,
         activity_logs: ActivityLogRepository,
         projects: ProjectRepository,
+        rag_messages: RagMessageRepository,
     ) -> None:
         self.repository = repository
         self.activity_logs = activity_logs
         self.projects = projects
+        self.rag_messages = rag_messages
 
     def _ensure_project(self, project_id: int | None) -> None:
         """없는 project_id 는 404 로 끊음"""
@@ -65,8 +68,7 @@ class DashboardService:
                     for status, count in pipeline.items()
                     if status in IN_FLIGHT_STATUSES
                 ),
-                # RAG 는 아직 미구현
-                rag_today=0,
+                rag_today=self._rag_today(project_id, accessible_project_ids),
             ),
             weekly_processing=self._weekly_processing(project_id, accessible_project_ids),
             document_types=[
@@ -76,6 +78,15 @@ class DashboardService:
                 )
             ],
             pipeline=self._pipeline_stages(pipeline),
+        )
+
+    def _rag_today(self, project_id: int | None, accessible_project_ids=None) -> int:
+        """오늘 들어온 RAG 질문 수. 날짜 경계는 weeklyProcessing 과 같은 UTC 기준"""
+        start = datetime.combine(
+            datetime.now(timezone.utc).date(), time.min, tzinfo=timezone.utc
+        )
+        return self.rag_messages.count_questions_since(
+            start, project_id=project_id, accessible_project_ids=accessible_project_ids
         )
 
     def _weekly_processing(self, project_id: int | None, accessible_project_ids=None) -> list[int]:
@@ -153,5 +164,8 @@ class DashboardService:
 
 def get_dashboard_service(db: Session = Depends(get_db)) -> DashboardService:
     return DashboardService(
-        DashboardRepository(db), ActivityLogRepository(db), ProjectRepository(db)
+        DashboardRepository(db),
+        ActivityLogRepository(db),
+        ProjectRepository(db),
+        RagMessageRepository(db),
     )

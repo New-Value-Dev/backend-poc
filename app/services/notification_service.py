@@ -27,6 +27,12 @@ class NotificationType:
     ANALYSIS_COMPLETE = "analysis.complete"
     ANALYSIS_FAIL = "analysis.fail"
 
+    TEXT_PROOFREAD_COMPLETE = "text_proofread.complete"
+    TEXT_PROOFREAD_FAIL = "text_proofread.fail"
+
+    QUIZ_GENERATE_COMPLETE = "quiz_generate.complete"
+    QUIZ_GENERATE_FAIL = "quiz_generate.fail"
+
 
 class NotificationNotFoundError(Exception):
     def __init__(self, notification_id: int) -> None:

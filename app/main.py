@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import app.models  # noqa: F401  -- 모든 SQLAlchemy 매퍼가 등록되도록 import
 from app.api.v1.router import api_router
 from app.core.config import get_settings
+from app.core.database import SessionLocal
 
 settings = get_settings()
 
@@ -25,7 +26,7 @@ API_DESCRIPTION = f"""
 
 ### 문서 처리 상태 흐름
 `UPLOADED → PARSING → PARSED → CHUNKING → CHUNKED → EMBEDDING → READY` (실패 시 `FAILED`).
-업로드 한 번으로 파싱·청킹·임베딩(로컬 KURE-v1)까지 자동으로 이어져 `READY`에 도달합니다.
+활성 임베딩 모델이 없으면 `CHUNKED` 에서 멈춘다 — 임베딩 인프라 미비는 처리 실패가 아니다.
 
 ### 비동기 작업 규약
 업로드와 AI 분석은 즉시 `202 Accepted` 를 돌려주고 실제 처리는 백그라운드에서 진행합니다.
@@ -77,10 +78,10 @@ TAGS_METADATA = [
         ),
     },
     {
-        "name": "rag",
+        "name": "embedding-lab",
         "description": (
-            "문서 기반 질의응답. 로컬 임베딩(KURE-v1) → pgvector 벡터 검색 → LLM 답변 생성 "
-            "순으로 동작하며, 단일 활성 모델·순수 벡터 검색 MVP입니다."
+            "관리자 전용(MVP2). 임베딩 모델 목록/활성화/재임베딩, 청킹 파라미터 x 모델 벤치마크, "
+            "검증된 조합의 운영 적용, 기존 문서의 수동 마이그레이션(재청킹+임베딩)을 다룹니다."
         ),
     },
 ]
@@ -101,3 +102,19 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.api_prefix)
+
+
+@app.on_event("startup")
+def _bootstrap_embedding_model() -> None:
+    """Settings.embedding_model_key 에 해당하는 EmbeddingModel 행이 없으면 시드 생성한다.
+
+    .env만 바꿔도 재배포 시 자동 반영되도록 Alembic 데이터 마이그레이션 대신 매 기동 시
+    (멱등하게) 확인한다.
+    """
+    from app.services.embedding.bootstrap import ensure_default_embedding_model
+
+    db = SessionLocal()
+    try:
+        ensure_default_embedding_model(db, settings)
+    finally:
+        db.close()

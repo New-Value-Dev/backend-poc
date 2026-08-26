@@ -75,3 +75,40 @@ class ApplyCorrectionsResponse(BaseModel):
     applied_count: int
     skipped_count: int
     skipped_reasons: list[str]
+
+
+class TextProofreadRequest(BaseModel):
+    """Document Core에 등록되지 않은 원문 텍스트 하나를 검사"""
+
+    content: str
+
+
+class TextProofreadFinding(BaseModel):
+    """텍스트 검사 결과 1건"""
+
+    id: str
+    original: str
+    suggestion: str
+    reason: str
+    category: str
+
+
+class TextProofreadJobRead(BaseModel):
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    status: str
+    provider: str | None
+    findings: list[TextProofreadFinding]
+    error: str | None = None
+    created_at: datetime
+
+
+class TextProofreadJobSummary(BaseModel):
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    status: str
+    created_at: datetime

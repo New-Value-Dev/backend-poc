@@ -46,10 +46,18 @@ class Action:
 
     CORRECTIONS_APPLY = "corrections.apply"
 
-    RAG_QUERY = "rag.query"
+    QUIZ_QUESTION_CREATE = "quiz_question.create"
+    QUIZ_QUESTION_DELETE = "quiz_question.delete"
+    QUIZ_BOOK_CREATE = "quiz_book.create"
+    QUIZ_BOOK_UPDATE = "quiz_book.update"
+    QUIZ_BOOK_DELETE = "quiz_book.delete"
+    QUIZ_SESSION_SUBMIT = "quiz_session.submit"
+    QUIZ_GENERATE_START = "quiz_generate.start"
+    QUIZ_GENERATE_COMPLETE = "quiz_generate.complete"
+    QUIZ_GENERATE_FAIL = "quiz_generate.fail"
 
 
-# 액션 코드
+# 액션 코드 
 ACTION_LABELS: dict[str, tuple[str, str]] = {
     Action.LOGIN: ("로그인", "로그인"),
     Action.PROJECT_CREATE: ("프로젝트 생성", "프로젝트"),
@@ -68,7 +76,15 @@ ACTION_LABELS: dict[str, tuple[str, str]] = {
     Action.DOCUMENT_MOVE: ("문서 이동", "문서"),
     Action.DOCUMENT_FOLDER_CHANGE: ("문서 폴더 변경", "문서"),
     Action.CORRECTIONS_APPLY: ("교정 적용", "교정"),
-    Action.RAG_QUERY: ("질의응답 실행", "RAG"),
+    Action.QUIZ_QUESTION_CREATE: ("문제 생성", "퀴즈"),
+    Action.QUIZ_QUESTION_DELETE: ("문제 삭제", "삭제"),
+    Action.QUIZ_BOOK_CREATE: ("문제집 생성", "퀴즈"),
+    Action.QUIZ_BOOK_UPDATE: ("문제집 수정", "퀴즈"),
+    Action.QUIZ_BOOK_DELETE: ("문제집 삭제", "삭제"),
+    Action.QUIZ_SESSION_SUBMIT: ("퀴즈 응시 제출", "퀴즈"),
+    Action.QUIZ_GENERATE_START: ("AI 문제 생성 시작", "퀴즈"),
+    Action.QUIZ_GENERATE_COMPLETE: ("AI 문제 생성 완료", "퀴즈"),
+    Action.QUIZ_GENERATE_FAIL: ("AI 문제 생성 실패", "퀴즈"),
 }
 
 ANALYSIS_LABELS: dict[str, tuple[str, str]] = {

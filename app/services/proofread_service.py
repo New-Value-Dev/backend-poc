@@ -11,13 +11,22 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal, get_db
 from app.models.ai_analysis_result import AiAnalysisResult
+from app.models.text_proofread_job import TextProofreadJob as TextProofreadJobModel
 from app.repositories.analysis_repository import AiAnalysisResultRepository
 from app.repositories.document_repository import (
     DocumentRepository,
     DocumentVersionRepository,
 )
+from app.repositories.text_proofread_job_repository import TextProofreadJobRepository
 from app.repositories.user_repository import UserRepository
-from app.schemas.proofread import FindingStatus, ProofreadFindingRead, ProofreadResult
+from app.schemas.proofread import (
+    FindingStatus,
+    ProofreadFindingRead,
+    ProofreadResult,
+    TextProofreadFinding,
+    TextProofreadJobRead,
+    TextProofreadJobSummary,
+)
 from app.services.activity_service import (
     Action,
     ActivityService,
@@ -82,6 +91,18 @@ class FindingNotFoundError(Exception):
         super().__init__(f"Finding {finding_id} not found")
 
 
+class ContentTooLongError(Exception):
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        super().__init__(f"본문이 너무 깁니다 (최대 {limit}자)")
+
+
+class TextProofreadJobNotFoundError(Exception):
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        super().__init__(f"Text proofread job {job_id} not found")
+
+
 def rehydrate_findings(result: dict) -> list[ProofreadFindingRead]:
     """findings JSONB를 스키마로 복원한다.
 
@@ -119,12 +140,95 @@ def build_result(
     )
 
 
+def build_text_job_result(job: TextProofreadJobModel) -> TextProofreadJobRead:
+    result = job.result or {}
+    raw = result.get("findings", [])
+    return TextProofreadJobRead(
+        id=job.id,
+        status=job.status,
+        provider=job.provider,
+        findings=[TextProofreadFinding(**f) for f in raw],
+        error=job.error,
+        created_at=job.created_at,
+    )
+
+
+_TEXT_NOTIFY_MESSAGES = {
+    NotificationType.TEXT_PROOFREAD_COMPLETE: lambda count: (
+        "맞춤법 검사 완료",
+        f"{count}건의 교정 제안을 찾았습니다." if count else "발견된 문제가 없습니다.",
+    ),
+    NotificationType.TEXT_PROOFREAD_FAIL: lambda _count: (
+        "맞춤법 검사 실패",
+        "텍스트 검사 중 오류가 발생했습니다.",
+    ),
+}
+
+
+def run_text_proofread_task(job_id: int, content: str) -> None:
+    """BackgroundTasks 진입점 — 자체 세션으로 검사하고 job 을 갱신 + 알림/푸시를 보낸다."""
+    db = SessionLocal()
+    try:
+        settings = get_settings()
+        jobs = TextProofreadJobRepository(db)
+        provider = get_llm_provider(settings)
+        notifications = notification_service_for(db, settings)
+
+        job = jobs.get(job_id)
+        if job is None:
+            logger.warning("run_text_proofread_task: job %s not found", job_id)
+            return
+        user_id = job.user_id
+
+        def notify(notification_type: str, count: int = 0, **meta) -> None:
+            title, body = _TEXT_NOTIFY_MESSAGES[notification_type](count)
+            notifications.notify(
+                user_id,
+                type=notification_type,
+                title=title,
+                body=body,
+                url="/proofread",
+                meta={"job_id": job_id, **meta},
+            )
+
+        try:
+            text = content.strip()
+            raw = provider.proofread(text) if text else []
+            findings = [
+                TextProofreadFinding(
+                    id=f"f{i}",
+                    original=f.original,
+                    suggestion=f.suggestion,
+                    reason=f.reason,
+                    category=f.category,
+                )
+                for i, f in enumerate(raw)
+            ]
+            job.result = {"findings": [f.model_dump() for f in findings]}
+            job.status = "COMPLETED"
+            job.provider = provider.name
+            db.commit()
+            notify(NotificationType.TEXT_PROOFREAD_COMPLETE, count=len(findings))
+        except LLMError as exc:
+            db.rollback()
+            job = jobs.get(job_id)
+            if job is not None:
+                job.status = "FAILED"
+                job.error = str(exc)
+                db.commit()
+            logger.warning("text proofread %s failed: %s", job_id, exc)
+            notify(NotificationType.TEXT_PROOFREAD_FAIL, error=str(exc)[:500])
+    finally:
+        db.close()
+
+
 class ProofreadService:
     def __init__(
         self,
         documents: DocumentRepository,
         versions: DocumentVersionRepository,
         analyses: AiAnalysisResultRepository,
+        text_jobs: TextProofreadJobRepository,
         provider: LLMProvider,
         settings: Settings,
         activity: ActivityService,
@@ -132,9 +236,31 @@ class ProofreadService:
         self.documents = documents
         self.versions = versions
         self.analyses = analyses
+        self.text_jobs = text_jobs
         self.provider = provider
         self.settings = settings
         self.activity = activity
+
+    def start_text_proofread(self, user_id: int, content: str) -> TextProofreadJobRead:
+        """검증 후 RUNNING 상태의 job 을 만들어 반환. 실제 검사는 백그라운드에서 진행된다."""
+        text = content.strip()
+        if len(text) > self.settings.proofread_max_chars_per_section:
+            raise ContentTooLongError(self.settings.proofread_max_chars_per_section)
+        job = self.text_jobs.add(TextProofreadJobModel(user_id=user_id, status="RUNNING"))
+        return build_text_job_result(job)
+
+    def list_text_proofread_jobs(self, user_id: int) -> list[TextProofreadJobSummary]:
+        return [
+            TextProofreadJobSummary.model_validate(j)
+            for j in self.text_jobs.list_by_user(user_id)
+        ]
+
+    def get_text_proofread_job(self, user_id: int, job_id: int) -> TextProofreadJobRead:
+        job = self.text_jobs.get(job_id)
+        # 남의 job 은 존재 자체를 알려주지 않는다 — 403 대신 404.
+        if job is None or job.user_id != user_id:
+            raise TextProofreadJobNotFoundError(job_id)
+        return build_text_job_result(job)
 
     def create_pending(
         self, document_id: int, *, created_by: str | None
@@ -376,6 +502,7 @@ def get_proofread_service(
         DocumentRepository(db),
         DocumentVersionRepository(db),
         AiAnalysisResultRepository(db),
+        TextProofreadJobRepository(db),
         get_llm_provider(settings),
         settings,
         activity,

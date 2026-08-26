@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
-from app.services.llm.base import ProofreadFinding, RagAnswerDraft, RagContextChunk
+from app.services.llm.base import ProofreadFinding, QuizDraft, RagAnswer, RagContext
 
 # 키 없이도 데모가 되도록 하는 아주 단순한 규칙 사전
 # 실제 교정은 OpenAILLMProvider(GPT)가 담당하고 이건 개발/폴백용
@@ -62,15 +63,103 @@ class MockLLMProvider:
         # 규칙 기반은 호출 비용이 없으므로 각 텍스트를 그대로 처리한다.
         return [self.proofread(t) for t in texts]
 
-    def answer_with_citations(
-        self, question: str, contexts: list[RagContextChunk]
-    ) -> RagAnswerDraft:
-        """OPENAI_API_KEY 없이도 전체 흐름을 테스트할 수 있게 하는 단순 폴백"""
+    def rewrite_query(self, question: str, history: list[tuple[str, str]]) -> str:
+        """실제 재작성은 GPT의 몫이므로 흉내내지 않고 원문 그대로 돌려준다(배선확인용)"""
+        return question
+
+    def answer_with_context(
+        self,
+        question: str,
+        contexts: list[RagContext],
+        history: list[tuple[str, str]] | None = None,
+    ) -> RagAnswer:
+        """키 없이 RAG 배선을 확인할 수 있게 검색된 1순위 근거를 그대로 요약"""
         if not contexts:
-            return RagAnswerDraft(answer="문서에서 근거를 찾지 못했습니다.", used_indices=[])
+            return RagAnswer(
+                answer="제공된 문서에서는 확인할 수 없습니다. (mock provider — 검색 결과 없음)",
+                cited_indexes=[],
+            )
         top = contexts[0]
-        snippet = top.content[:300]
-        return RagAnswerDraft(
-            answer=f"[{top.document_name}] 관련 내용: {snippet}",
-            used_indices=[top.index],
+        excerpt = top.content if len(top.content) <= 300 else top.content[:300] + "…"
+        return RagAnswer(
+            answer=(
+                f"[mock provider] 질문 「{question}」에 대해 검색된 1순위 근거는 "
+                f"{top.label} 입니다.\n\n{excerpt} [{top.index}]\n\n"
+                "실제 자연어 답변은 OPENAI_API_KEY 를 설정하면 GPT가 생성합니다."
+            ),
+            cited_indexes=[top.index],
         )
+
+    def answer_with_context_stream(
+        self,
+        question: str,
+        contexts: list[RagContext],
+        history: list[tuple[str, str]] | None = None,
+    ) -> Iterable[str]:
+        """실제 provider와 배선을 맞추려고 완성된 답을 단어 단위로 흉내만 내서 흘려보낸다."""
+        answer = self.answer_with_context(question, contexts, history)
+        return self._split_words(answer.answer)
+
+    @staticmethod
+    def _split_words(text: str) -> Iterable[str]:
+        words = text.split(" ")
+        for i, word in enumerate(words):
+            yield word if i == len(words) - 1 else word + " "
+
+    def generate_quiz(
+        self,
+        contexts: list[RagContext],
+        *,
+        count: int,
+        types: list[str],
+        difficulty: str | None = None,
+        avoid_texts: list[str] | None = None,
+    ) -> list[QuizDraft]:
+        """키 없이 생성 배선(배치 분할 -> 검증 -> 문항 저장)을 확인하기 위한 캔드 문항"""
+        if not contexts or count <= 0:
+            return []
+
+        allowed = [t for t in ("SINGLE_CHOICE", "TRUE_FALSE", "SHORT_ANSWER") if t in set(types)]
+        allowed = allowed or ["SINGLE_CHOICE"]
+        # avoid_texts 는 일부러 무시한다
+
+        drafts: list[QuizDraft] = []
+        for i in range(count):
+            ctx = contexts[i % len(contexts)]
+            qtype = allowed[i % len(allowed)]
+            snippet = ctx.content.strip().replace("\n", " ")[:60] or "(근거 없음)"
+            text = f"[mock] {ctx.label} 근거[{ctx.index}]의 내용에 관한 문항 {i + 1}: 「{snippet}」"
+
+            if qtype == "SINGLE_CHOICE":
+                draft = QuizDraft(
+                    type=qtype,
+                    text=text,
+                    options=["보기 1(정답)", "보기 2", "보기 3", "보기 4"],
+                    correct_answer="0",
+                    explanation=f"mock provider 가 근거[{ctx.index}]로 만든 예시 해설입니다.",
+                    difficulty=difficulty or "MEDIUM",
+                    tags=["mock"],
+                    source_index=ctx.index,
+                )
+            elif qtype == "TRUE_FALSE":
+                draft = QuizDraft(
+                    type=qtype,
+                    text=text,
+                    correct_answer="O",
+                    explanation=f"mock provider 가 근거[{ctx.index}]로 만든 예시 해설입니다.",
+                    difficulty=difficulty or "MEDIUM",
+                    tags=["mock"],
+                    source_index=ctx.index,
+                )
+            else:
+                draft = QuizDraft(
+                    type=qtype,
+                    text=text,
+                    correct_answer="mock",
+                    explanation=f"mock provider 가 근거[{ctx.index}]로 만든 예시 해설입니다.",
+                    difficulty=difficulty or "MEDIUM",
+                    tags=["mock"],
+                    source_index=ctx.index,
+                )
+            drafts.append(draft)
+        return drafts

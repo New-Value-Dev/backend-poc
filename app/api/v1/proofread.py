@@ -17,6 +17,9 @@ from app.schemas.proofread import (
     ApplyCorrectionsResponse,
     FindingStatusUpdate,
     ProofreadResult,
+    TextProofreadJobRead,
+    TextProofreadJobSummary,
+    TextProofreadRequest,
 )
 from app.services.activity_service import Action, ActivityService, get_activity_service
 from app.services.correction_service import (
@@ -36,12 +39,15 @@ from app.services.parsing_service import run_parse_task
 from app.services.proofread_service import (
     AnalysisNotCompletedError,
     AnalysisNotFoundError,
+    ContentTooLongError,
     DocumentNotReadyError,
     FindingNotFoundError,
     ProofreadService,
+    TextProofreadJobNotFoundError,
     build_result,
     get_proofread_service,
     run_proofread_task,
+    run_text_proofread_task,
 )
 from app.services.project_service import (
     ProjectForbiddenError,
@@ -286,3 +292,71 @@ def apply_corrections(
         skipped_count=outcome.skipped_count,
         skipped_reasons=outcome.skipped_reasons,
     )
+
+
+TextJobIdPath = Annotated[
+    int, Path(description="텍스트 검사 job id — 검사 시작 응답의 `id`", examples=[1])
+]
+
+
+@router.post(
+    "/text/proofread",
+    response_model=TextProofreadJobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="문서 없이 원문 텍스트 오탈자 검증 시작 (비동기)",
+    response_description="`status=\"RUNNING\"`, `findings=[]` 인 job(202)",
+    responses={
+        **AUTH_RESPONSES,
+        400: {"description": "본문이 최대 길이를 초과함"},
+    },
+)
+def start_text_proofread(
+    body: TextProofreadRequest,
+    background_tasks: BackgroundTasks,
+    service: ProofreadService = Depends(get_proofread_service),
+    current_user: User = Depends(get_current_user),
+) -> TextProofreadJobRead:
+    """Document Core에 등록되지 않은 원문 텍스트 하나를 검사"""
+    try:
+        job = service.start_text_proofread(current_user.id, body.content)
+    except ContentTooLongError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+
+    background_tasks.add_task(run_text_proofread_task, job.id, body.content)
+    return job
+
+
+@router.get(
+    "/text/proofread",
+    response_model=list[TextProofreadJobSummary],
+    summary="텍스트 검사 이력",
+    response_description="현재 사용자의 최근 텍스트 검사 job 목록(최신순, 결과 본문 제외)",
+    responses={**AUTH_RESPONSES},
+)
+def list_text_proofread(
+    service: ProofreadService = Depends(get_proofread_service),
+    current_user: User = Depends(get_current_user),
+) -> list[TextProofreadJobSummary]:
+    """페이지 재진입 시 아직 RUNNING인 job이 있으면 폴링을 재개"""
+    return service.list_text_proofread_jobs(current_user.id)
+
+
+@router.get(
+    "/text/proofread/{job_id}",
+    response_model=TextProofreadJobRead,
+    summary="텍스트 검사 결과 (폴링용)",
+    response_description="`status` + 완료 시 `findings`",
+    responses={**AUTH_RESPONSES, 404: {"description": "job이 없거나 다른 사용자의 job"}},
+)
+def get_text_proofread(
+    job_id: TextJobIdPath,
+    service: ProofreadService = Depends(get_proofread_service),
+    current_user: User = Depends(get_current_user),
+) -> TextProofreadJobRead:
+    """검사 시작 후 이걸 폴링해 완료를 감지한다"""
+    try:
+        return service.get_text_proofread_job(current_user.id, job_id)
+    except TextProofreadJobNotFoundError:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Text proofread job {job_id} not found"
+        ) from None

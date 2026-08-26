@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import BigInteger, ForeignKey, Integer, Text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, Computed, ForeignKey, Integer, Text
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -34,6 +34,9 @@ class DocumentChunk(CreatedAtMixin, Base):
     page_end: Mapped[int | None] = mapped_column(Integer)
     # 예약어 metadata 와 충돌을 피하려고 속성명은 chunk_metadata, 컬럼명은 metadata 로 둔다.
     chunk_metadata: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+    content_tsv: Mapped[Any] = mapped_column(
+        TSVECTOR, Computed("to_tsvector('simple', content)", persisted=True)
+    )
 
     embeddings: Mapped[list[ChunkEmbedding]] = relationship(
         back_populates="chunk", cascade="all, delete-orphan"

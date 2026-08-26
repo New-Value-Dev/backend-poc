@@ -4,20 +4,34 @@ from typing import Protocol, runtime_checkable
 
 
 class EmbeddingError(Exception):
-    """임베딩 생성 실패(모델 로드/추론 오류 등)."""
+    """임베딩 호출 실패(모델 로드/추론 등)."""
+
+
+class EmbeddingConfigError(EmbeddingError):
+    """Embedding provider 설정 문제(예: 차원 불일치)."""
 
 
 @runtime_checkable
 class EmbeddingProvider(Protocol):
-    """임베딩 provider 인터페이스. local 외 API 기반 provider 도 이 뒤에 붙는다."""
+    """로컬/원격 임베딩 provider 공통 인터페이스. docs/DESIGN.md §12 시그니처."""
 
-    name: str  # embedding_models.model_key 와 대응(로깅/식별용)
-    dimension: int  # EMBEDDING_DIM(1024)과 일치해야 함
+    name: str
+    dimension: int
+
+    def load(self) -> None:
+        """모델 가중치를 메모리에 올린다. 무거운 작업이라 생성자와 분리한다."""
+        ...
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """chunk 텍스트 목록 → 벡터 목록(입력 순서와 1:1 대응)."""
+        """저장용(문서) 텍스트를 배치로 임베딩한다. 반환은 입력 순서와 1:1 대응."""
         ...
 
     def embed_query(self, text: str) -> list[float]:
-        """질의 1건 → 벡터 1개."""
+        """검색 쿼리 1건을 임베딩한다."""
+        ...
+
+    def get_dimension(self) -> int:
+        ...
+
+    def get_model_name(self) -> str:
         ...

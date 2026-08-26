@@ -57,6 +57,15 @@ def require_project_access(
         ) from None
 
 
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """EmbeddingLab처럼 관리자 전용인 라우트에서 `Depends(require_admin)` 로 쓴다."""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "이 작업은 관리자만 할 수 있습니다"
+        )
+    return current_user
+
+
 def require_project_owner(
     project_id: int,
     service: ProjectService = Depends(get_project_service),

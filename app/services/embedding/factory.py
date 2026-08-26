@@ -1,44 +1,49 @@
 from __future__ import annotations
 
-from functools import lru_cache
+import threading
+from collections import OrderedDict
 
 from app.core.config import Settings
-from app.models.chunk_embedding import EMBEDDING_DIM
-from app.services.embedding.base import EmbeddingProvider
-from app.services.embedding.local_provider import LocalSentenceTransformerProvider
+from app.models.embedding_model import EmbeddingModel
+from app.services.embedding.base import EmbeddingConfigError, EmbeddingProvider
+from app.services.embedding.local_provider import SentenceTransformerProvider
+
+_cache: "OrderedDict[str, EmbeddingProvider]" = OrderedDict()
+_cache_lock = threading.Lock()
 
 
-@lru_cache
-def _load_local(
-    model_name: str,
-    device: str,
-    batch_size: int,
-    max_seq_length: int,
-    cache_folder: str,
-) -> LocalSentenceTransformerProvider:
-    """모델을 프로세스당 한 번만 로드(수 GB RAM/수 초~수십 초 로딩 비용)."""
-    return LocalSentenceTransformerProvider(
-        model_name,
-        device=device,
-        dimension=EMBEDDING_DIM,
-        batch_size=batch_size,
-        max_seq_length=max_seq_length,
-        cache_folder=cache_folder,
-    )
+def _cache_key(model: EmbeddingModel, device: str) -> str:
+    return f"{model.model_key}:{device}"
 
 
-def get_embedding_provider(settings: Settings) -> EmbeddingProvider:
-    """설정에 따라 임베딩 provider 를 고른다.
-
-    현재는 "local"만 지원 — 나중에 API 기반/별도 서비스로 확장할 때
-    이 함수만 갈아끼우면 된다(embedding/base.py 의 EmbeddingProvider 계약만 지키면 됨).
-    """
-    if settings.embedding_provider == "local":
-        return _load_local(
-            settings.embedding_model_name,
-            settings.embedding_device,
-            settings.embedding_batch_size,
-            settings.embedding_max_seq_length,
-            settings.embedding_cache_dir,
+def get_embedding_provider(settings: Settings, model: EmbeddingModel) -> EmbeddingProvider:
+    """등록된 EmbeddingModel 행 + Settings 로 provider 를 만들거나 캐시에서 재사용한다."""
+    if settings.embedding_provider != "local":
+        raise EmbeddingConfigError(
+            f"지원하지 않는 embedding_provider: {settings.embedding_provider}"
         )
-    raise ValueError(f"unsupported embedding_provider: {settings.embedding_provider}")
+
+    key = _cache_key(model, settings.embedding_device)
+    with _cache_lock:
+        cached = _cache.get(key)
+        if cached is not None:
+            _cache.move_to_end(key)
+            return cached
+
+        config = model.config or {}
+        provider = SentenceTransformerProvider(
+            model.model_key,
+            model.model_name,
+            expected_dimension=model.dimension,
+            model_path=model.model_path,
+            device=settings.embedding_device,
+            cache_dir=settings.embedding_cache_dir,
+            batch_size=settings.embedding_batch_size,
+            max_seq_length=model.max_tokens or settings.embedding_max_seq_length,
+            query_prefix=config.get("query_prefix", ""),
+            doc_prefix=config.get("doc_prefix", ""),
+        )
+        _cache[key] = provider
+        while len(_cache) > settings.embedding_max_loaded_models:
+            _cache.popitem(last=False)
+        return provider
