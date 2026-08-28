@@ -72,7 +72,14 @@ class RagStreamContext:
     question: str
     search_question: str
     user: User
+    # user.id / conversation.id 를 미리 뽑아 둔 값들. query_stream_prepare() 도중 재작성
+    # 호출의 usage 로그 commit(expire_on_commit)이 user/conversation 객체를 만료시키고,
+    # 스트림 제너레이터가 실행될 때는 Depends(get_db) 세션이 이미 닫혀 있어 만료된 속성을
+    # 다시 읽으면 DetachedInstanceError 가 난다 — 그래서 세션이 살아있는 시점에 값만 떼어 둔다.
+    # ctx.user.id / ctx.conversation.id 를 새로 추가하지 말고 이 값들을 쓸 것.
+    user_id: int
     conversation: RagConversation | None
+    conversation_id: int | None
     project_ids: list[int]
     folder_ids: list[int]
     result: RetrievalResult
@@ -290,6 +297,9 @@ class RagService:
         )
         if conversation is not None and scope is None and conversation.scope:
             scope = RagScope(**conversation.scope)
+        # 세션이 살아있는 지금 값을 떼어 둔다 — 아래 _rewrite_for_search() 의 usage 로그 commit이
+        # conversation 객체를 만료시킬 수 있다 (RagStreamContext.conversation_id 주석 참고)
+        existing_conversation_id = conversation.id if conversation is not None else None
 
         project_ids, folder_ids, accessible = self._resolve_scope(scope, user)
         history = self._history(conversation)
@@ -325,7 +335,9 @@ class RagService:
             question=question,
             search_question=search_question,
             user=user,
+            user_id=user.id,
             conversation=conversation,
+            conversation_id=existing_conversation_id,
             project_ids=project_ids,
             folder_ids=folder_ids,
             result=result,
@@ -346,7 +358,7 @@ class RagService:
         is_new = conversation is None
 
         yield "meta", {
-            "conversation_id": conversation.id if conversation else None,
+            "conversation_id": ctx.conversation_id,
             "embedding_model": ctx.result.embedding_model_key,
             "retrieved_count": len(ctx.result.chunks),
             # question 과 다르면 재작성이 적용된 것 — 원문과 같으면 재작성 없이 그대로 검색함.
@@ -366,7 +378,7 @@ class RagService:
         except LLMError:
             logger.exception(
                 "rag stream: LLM 호출 실패 user=%s conv=%s",
-                ctx.user.id, conversation.id if conversation else None,
+                ctx.user_id, ctx.conversation_id,
             )
             code = RagStreamErrorCode.LLM_CALL_FAILED
             yield "error", {"code": code, "detail": RAG_STREAM_FALLBACK_MESSAGES[code]}
@@ -395,18 +407,21 @@ class RagService:
         if is_new:
             conversation = self.conversations.add(
                 RagConversation(
-                    user_id=ctx.user.id,
+                    user_id=ctx.user_id,
                     project_id=ctx.project_ids[0] if len(ctx.project_ids) == 1 else None,
                     scope={"project_ids": ctx.project_ids, "folder_ids": ctx.folder_ids},
                     title=ctx.question[:TITLE_MAX_CHARS],
                 )
             )
+            conv_id = conversation.id
+        else:
+            conv_id = ctx.conversation_id
         self.messages.add(
-            RagMessage(conversation_id=conversation.id, role=ROLE_USER, content=ctx.question)
+            RagMessage(conversation_id=conv_id, role=ROLE_USER, content=ctx.question)
         )
         assistant = self.messages.add(
             RagMessage(
-                conversation_id=conversation.id,
+                conversation_id=conv_id,
                 role=ROLE_ASSISTANT,
                 content=answer_text,
                 citations=citations,
@@ -417,13 +432,13 @@ class RagService:
             )
         )
 
-        conversation_id = conversation.id
+        conversation_id = conv_id
         message_id = assistant.id
         self.db.commit()
 
         logger.info(
             "rag query stream: user=%s conv=%s retrieved=%s cited=%s provider=%s %.0fms",
-            ctx.user.id, conversation_id, len(ctx.result.chunks), len(citations),
+            ctx.user_id, conversation_id, len(ctx.result.chunks), len(citations),
             ctx.provider.name, latency_ms,
         )
 
