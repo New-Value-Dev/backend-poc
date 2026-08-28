@@ -58,6 +58,25 @@ def _bucket(data: dict) -> UsageBucket:
     )
 
 
+_EMPTY_BUCKET_DICT = {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0,
+    "calls": 0,
+    "estimated_cost_usd": 0.0,
+}
+
+
+def _sum_bucket_range(by_day: dict[str, dict], start: date, end: date) -> dict:
+    """by_day 중 [start, end] 날짜만 합산 (fetch 구간이 통계 구간보다 넓을 때 사용)"""
+    total = dict(_EMPTY_BUCKET_DICT)
+    for day_key, bucket in by_day.items():
+        if start <= date.fromisoformat(day_key) <= end:
+            for k in _EMPTY_BUCKET_DICT:
+                total[k] += bucket[k]
+    return total
+
+
 @router.get(
     "/usage/summary",
     response_model=UsageSummaryRead,
@@ -127,6 +146,7 @@ def usage_logs(
     responses={**AUTH_RESPONSES, **ADMIN_RESPONSE},
 )
 def billing_summary(
+    chart_period: Period = Query("month", description="daily_actual(비용 추이 차트)이 커버할 기간"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     _: User = Depends(require_admin),
@@ -135,23 +155,16 @@ def billing_summary(
 
     today_start, now = _period_bounds("day")
     month_start, _ = _period_bounds("month")
+    chart_start, _ = _period_bounds(chart_period)
+    fetch_start = min(month_start, chart_start)
     today_key = today_start.date().isoformat()
 
-    # 월 범위 한 번의 API 왕복으로 이번달 전체 + 오늘을 같이 뽑는다
-    api_summary = llm_usage_service.usage_summary_from_api(settings, month_start, now)
+    # 이번달 통계 + 차트 구간을 한 번의 API 왕복으로 같이 뽑는다
+    api_summary = llm_usage_service.usage_summary_from_api(settings, fetch_start, now)
     if api_summary is not None:
         cost_source = "actual"
-        month_bucket = api_summary["total"]
-        today_bucket = api_summary["by_day"].get(
-            today_key,
-            {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "calls": 0,
-                "estimated_cost_usd": 0.0,
-            },
-        )
+        month_bucket = _sum_bucket_range(api_summary["by_day"], month_start.date(), now.date())
+        today_bucket = api_summary["by_day"].get(today_key, dict(_EMPTY_BUCKET_DICT))
         daily_actual = [
             BillingDailyRead(
                 date=date.fromisoformat(day_key),
@@ -159,12 +172,21 @@ def billing_summary(
                 amount_krw=bucket["estimated_cost_usd"] * rate,
             )
             for day_key, bucket in sorted(api_summary["by_day"].items())
+            if chart_start.date() <= date.fromisoformat(day_key) <= now.date()
         ]
     else:
         cost_source = "estimated"
         month_bucket = llm_usage_service.usage_summary(db, month_start, now, settings)["total"]
         today_bucket = llm_usage_service.usage_summary(db, today_start, now, settings)["total"]
-        daily_actual = []
+        chart_local = llm_usage_service.usage_summary(db, chart_start, now, settings)
+        daily_actual = [
+            BillingDailyRead(
+                date=date.fromisoformat(day_key),
+                amount_usd=bucket["estimated_cost_usd"],
+                amount_krw=bucket["estimated_cost_usd"] * rate,
+            )
+            for day_key, bucket in sorted(chart_local["by_day"].items())
+        ]
 
     return BillingSummaryRead(
         actual_available=(cost_source == "actual"),

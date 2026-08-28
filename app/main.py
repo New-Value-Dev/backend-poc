@@ -147,6 +147,21 @@ def _warm_embedding_model() -> None:
 
 
 @app.on_event("startup")
+def _warm_keyword_tokenizer() -> None:
+    """Kiwi 형태소 분석기를 백그라운드 스레드에서 미리 초기화 (첫 검색 키워드 조회가 느려지는 것 방지)"""
+    from app.services.search_keyword_service import _get_kiwi
+
+    def _warm() -> None:
+        try:
+            _get_kiwi()
+            logger.info("kiwi tokenizer warmed up")
+        except Exception:
+            logger.exception("kiwi tokenizer warm-up 실패 — 첫 사용 시점에 지연 로딩됩니다")
+
+    threading.Thread(target=_warm, daemon=True, name="kiwi-warmup").start()
+
+
+@app.on_event("startup")
 def _start_quiz_due_reminder_scheduler() -> None:
     """마감기한이 임박한 퀴즈의 미제출 지정자에게 주기적으로 리마인더를 보낸다"""
     from app.services.quiz_reminder_service import run_due_reminder_loop
