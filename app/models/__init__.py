@@ -20,13 +20,17 @@ from app.models.document_section import DocumentSection
 from app.models.document_version import DocumentVersion
 from app.models.embedding_job import EmbeddingJob
 from app.models.embedding_model import EmbeddingModel
+from app.models.exchange_rate_cache import ExchangeRateCache
 from app.models.folder import Folder
+from app.models.llm_usage_log import LLMUsageLog
+from app.models.model_price_cache import ModelPriceCache
 from app.models.notification import Notification
 from app.models.project import Project
 from app.models.project_member import ProjectMember
 from app.models.push_subscription import PushSubscription
 from app.models.quiz_answer import QuizAnswer
 from app.models.quiz_book import QuizBook
+from app.models.quiz_book_assignee import QuizBookAssignee
 from app.models.quiz_book_question import QuizBookQuestion
 from app.models.quiz_generation_job import QuizGenerationJob
 from app.models.quiz_question import QuizQuestion
@@ -60,10 +64,14 @@ __all__ = [
     "TextProofreadJob",
     "QuizQuestion",
     "QuizBook",
+    "QuizBookAssignee",
     "QuizBookQuestion",
     "QuizSession",
     "QuizAnswer",
     "QuizGenerationJob",
     "RagConversation",
     "RagMessage",
+    "LLMUsageLog",
+    "ExchangeRateCache",
+    "ModelPriceCache",
 ]

@@ -6,6 +6,7 @@ import re
 
 from app.models.quiz_question import (
     DIFFICULTY_MEDIUM,
+    QUESTION_TYPE_ESSAY,
     QUESTION_TYPE_SHORT_ANSWER,
     QUESTION_TYPE_SINGLE_CHOICE,
     QUESTION_TYPE_TRUE_FALSE,
@@ -72,6 +73,10 @@ def validate_draft(
     elif draft.type == QUESTION_TYPE_SHORT_ANSWER:
         if not answer:
             return None, "단답형 정답 없음"
+
+    elif draft.type == QUESTION_TYPE_ESSAY:
+        if not answer:
+            return None, "서술형 모범답안 없음"
 
     difficulty = (draft.difficulty or "").strip().upper()
     if difficulty not in QUIZ_DIFFICULTIES:

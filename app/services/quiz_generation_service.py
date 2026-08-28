@@ -23,6 +23,7 @@ from app.models.quiz_question import (
     REVIEW_STATUS_DRAFT,
     QuizQuestion,
 )
+from app.models.user import User
 from app.repositories.document_repository import (
     DocumentRepository,
     DocumentVersionRepository,
@@ -41,13 +42,19 @@ from app.services.activity_service import (
 )
 from app.services.llm import LLMError
 from app.services.llm.factory import get_llm_provider
+from app.services.llm_usage_service import usage_sink
 from app.services.notification_service import (
     NotificationType,
     notification_service_for,
 )
 from app.services.quiz.planner import GenerationBatch, NoChunksError, plan_batches
 from app.services.quiz.validation import normalize_text, validate_draft
-from app.services.quiz_service import QuizBookLockedError, QuizBookNotFoundError
+from app.services.quiz_service import (
+    QuizBookForbiddenError,
+    QuizBookLockedError,
+    QuizBookNotFoundError,
+    can_manage_quiz_book,
+)
 from app.services.rag.context import build_contexts
 
 logger = logging.getLogger(__name__)
@@ -104,7 +111,7 @@ class QuizGenerationService:
         self.activity = activity
 
     def start(
-        self, project_id: int, user_id: int, payload: QuizGenerateRequest
+        self, project_id: int, current_user: User, payload: QuizGenerateRequest
     ) -> QuizGenerationJob:
         """검증 후 RUNNING 잡을 만들어 반환/ 실제 생성은 백그라운드에서 진행"""
         count = min(payload.count, self.settings.quiz_gen_max_questions)
@@ -122,11 +129,14 @@ class QuizGenerationService:
             # 기존 잠금 정책 재사용 — 응시 이력이 있는 문제집에는 문항을 추가할 수 없다
             if self.sessions.has_sessions(book.id):
                 raise QuizBookLockedError(book.id)
+            # 생성 결과를 기존 문제집에 편입하는 것도 "문제집 관리"이므로 같은 권한 규칙을 적용
+            if not can_manage_quiz_book(book, current_user):
+                raise QuizBookForbiddenError(book.id)
 
         job = self.jobs.add(
             QuizGenerationJob(
                 project_id=project_id,
-                user_id=user_id,
+                user_id=current_user.id,
                 quiz_book_id=payload.quiz_book_id,
                 status=QUIZ_GEN_STATUS_RUNNING,
                 params={
@@ -217,7 +227,10 @@ def run_quiz_generation_task(job_id: int) -> None:
             )
 
         try:
-            provider = get_llm_provider(settings)
+            provider = get_llm_provider(
+                settings,
+                on_usage=usage_sink(db, user_id=job.user_id, project_id=job.project_id),
+            )
             job.provider = provider.name
 
             loaded = _load_documents(

@@ -21,7 +21,7 @@ from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.document_version import DocumentVersion
 from app.models.rag_conversation import RagConversation
-from app.models.rag_message import ROLE_USER, RagMessage
+from app.models.rag_message import ROLE_ASSISTANT, ROLE_USER, RagMessage
 
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
@@ -241,3 +241,72 @@ class RagMessageRepository:
         elif accessible_project_ids is not None:
             stmt = stmt.where(RagConversation.project_id.in_(accessible_project_ids))
         return self.db.scalar(stmt) or 0
+
+    # ── 관리자 전용 (전체 사용자) ──
+
+    def list_question_texts_between(self, start: datetime, end: datetime) -> list[str]:
+        """검색 키워드 순위 집계용"""
+        stmt = select(RagMessage.content).where(
+            RagMessage.role == ROLE_USER,
+            RagMessage.created_at >= start,
+            RagMessage.created_at < end,
+        )
+        return list(self.db.scalars(stmt))
+
+    def _preceding_question(self, conversation_id: int, before_id: int) -> str | None:
+        stmt = (
+            select(RagMessage.content)
+            .where(
+                RagMessage.conversation_id == conversation_id,
+                RagMessage.role == ROLE_USER,
+                RagMessage.id < before_id,
+            )
+            .order_by(RagMessage.id.desc())
+            .limit(1)
+        )
+        return self.db.scalar(stmt)
+
+    def list_admin_qa_page(
+        self, *, limit: int, offset: int, user_id: int | None = None
+    ) -> tuple[list[dict], int]:
+        """관리자용 검색-답변 로그"""
+        stmt = (
+            select(RagMessage, RagConversation)
+            .join(RagConversation, RagConversation.id == RagMessage.conversation_id)
+            .where(RagMessage.role == ROLE_ASSISTANT)
+        )
+        count_stmt = (
+            select(func.count())
+            .select_from(RagMessage)
+            .join(RagConversation, RagConversation.id == RagMessage.conversation_id)
+            .where(RagMessage.role == ROLE_ASSISTANT)
+        )
+        if user_id is not None:
+            stmt = stmt.where(RagConversation.user_id == user_id)
+            count_stmt = count_stmt.where(RagConversation.user_id == user_id)
+        stmt = (
+            stmt.order_by(RagMessage.created_at.desc(), RagMessage.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = self.db.execute(stmt).all()
+        total = self.db.scalar(count_stmt) or 0
+
+        out = []
+        for message, conversation in rows:
+            out.append(
+                {
+                    "message_id": message.id,
+                    "conversation_id": conversation.id,
+                    "user_id": conversation.user_id,
+                    "question": self._preceding_question(conversation.id, message.id),
+                    "answer": message.content,
+                    "citations": message.citations,
+                    "provider": message.provider,
+                    "retrieved_count": message.retrieved_count,
+                    "latency_ms": message.latency_ms,
+                    "confidence": message.confidence,
+                    "created_at": message.created_at,
+                }
+            )
+        return out, total

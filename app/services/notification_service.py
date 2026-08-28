@@ -33,6 +33,9 @@ class NotificationType:
     QUIZ_GENERATE_COMPLETE = "quiz_generate.complete"
     QUIZ_GENERATE_FAIL = "quiz_generate.fail"
 
+    QUIZ_ASSIGNED = "quiz.assigned"
+    QUIZ_DUE_SOON = "quiz.due_soon"
+
 
 class NotificationNotFoundError(Exception):
     def __init__(self, notification_id: int) -> None:

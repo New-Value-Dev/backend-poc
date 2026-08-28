@@ -1,9 +1,9 @@
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.quiz_answer import QuizAnswer
 from app.models.quiz_book import QuizBook
-from app.models.quiz_session import QuizSession
+from app.models.quiz_session import SESSION_STATUS_IN_PROGRESS, QuizSession
 
 
 class QuizSessionRepository:
@@ -19,20 +19,51 @@ class QuizSessionRepository:
     def get(self, session_id: int) -> QuizSession | None:
         return self.db.get(QuizSession, session_id)
 
-    def list_by_book(self, quiz_book_id: int, *, user_id: int | None = None) -> list[QuizSession]:
-        stmt = select(QuizSession).where(QuizSession.quiz_book_id == quiz_book_id)
-        if user_id is not None:
-            stmt = stmt.where(QuizSession.user_id == user_id)
-        return list(self.db.scalars(stmt.order_by(QuizSession.id.desc())))
+    def delete(self, session: QuizSession) -> None:
+        self.db.delete(session)
+        self.db.commit()
 
-    def list_by_project(self, project_id: int, *, user_id: int | None = None) -> list[QuizSession]:
+    def get_in_progress(self, quiz_book_id: int, user_id: int) -> QuizSession | None:
+        """이 유저가 이 문제집에 진행중인 세션이 있으면 그것을 돌려준다"""
         stmt = (
             select(QuizSession)
+            .where(
+                QuizSession.quiz_book_id == quiz_book_id,
+                QuizSession.user_id == user_id,
+                QuizSession.status == SESSION_STATUS_IN_PROGRESS,
+            )
+            .order_by(QuizSession.id.desc())
+            .limit(1)
+        )
+        return self.db.scalar(stmt)
+
+    def list_by_book(
+        self, quiz_book_id: int, *, user_id: int | None = None, status: str | None = None
+    ) -> list[QuizSession]:
+        stmt = (
+            select(QuizSession)
+            .options(joinedload(QuizSession.user))
+            .where(QuizSession.quiz_book_id == quiz_book_id)
+        )
+        if user_id is not None:
+            stmt = stmt.where(QuizSession.user_id == user_id)
+        if status is not None:
+            stmt = stmt.where(QuizSession.status == status)
+        return list(self.db.scalars(stmt.order_by(QuizSession.id.desc())))
+
+    def list_by_project(
+        self, project_id: int, *, user_id: int | None = None, status: str | None = None
+    ) -> list[QuizSession]:
+        stmt = (
+            select(QuizSession)
+            .options(joinedload(QuizSession.user))
             .join(QuizBook, QuizBook.id == QuizSession.quiz_book_id)
             .where(QuizBook.project_id == project_id)
         )
         if user_id is not None:
             stmt = stmt.where(QuizSession.user_id == user_id)
+        if status is not None:
+            stmt = stmt.where(QuizSession.status == status)
         return list(self.db.scalars(stmt.order_by(QuizSession.id.desc())))
 
     def has_sessions(self, quiz_book_id: int) -> bool:
@@ -70,6 +101,9 @@ class QuizSessionRepository:
             existing.options = answer.options
             existing.correct_answer = answer.correct_answer
             existing.explanation = answer.explanation
+            existing.similarity_score = answer.similarity_score
+            existing.score = answer.score
+            existing.feedback = answer.feedback
             self.db.commit()
             self.db.refresh(existing)
             return existing

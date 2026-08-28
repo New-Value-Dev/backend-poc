@@ -44,6 +44,28 @@ class RagAnswer:
 
 
 @dataclass
+class EssayGrade:
+    """서술형 답안 채점 결과"""
+
+    score: float
+    feedback: str
+
+
+@dataclass
+class LLMUsageEvent:
+    """OpenAI 호출 1건의 계측 결과"""
+
+    feature: str
+    model: str
+    status: str  # "success" | "fail"
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    latency_ms: float | None = None
+    error_message: str | None = None
+
+
+@dataclass
 class QuizDraft:
     """LLM이 만든 문항 초안 1개. 아직 검증 전이라 그대로 DB에 넣지 않는다.
 
@@ -131,6 +153,16 @@ class LLMProvider(Protocol):
         avoid_texts 는 이미 출제된 문항 본문 — 같은 문제를 다시 만들지 않게 하는 힌트다.
         반환은 검증 전 초안이며, 개수가 count 와 정확히 같지 않을 수 있다.
         """
+        ...
+
+    def grade_essay(
+        self, *, question: str, model_answer: str, rubric: str, user_answer: str
+    ) -> EssayGrade:
+        """서술형 답안을 모범답안/채점기준 대비 0~100점으로 채점하고 코멘트를 준다"""
+        ...
+
+    def judge_short_answer(self, *, question: str, correct_answer: str, user_answer: str) -> bool:
+        """단답형 답이 정답과 사실상 같은 뜻인지 True/False 로만 판정한다"""
         ...
 
 

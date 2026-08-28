@@ -1,5 +1,5 @@
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.quiz_question import QuizQuestion
 
@@ -18,7 +18,11 @@ class QuizQuestionRepository:
         review_status: str | None = None,
         q: str | None = None,
     ) -> list[QuizQuestion]:
-        stmt = select(QuizQuestion).where(QuizQuestion.project_id == project_id)
+        stmt = (
+            select(QuizQuestion)
+            .options(joinedload(QuizQuestion.source_document))
+            .where(QuizQuestion.project_id == project_id)
+        )
         if document_id is not None:
             stmt = stmt.where(QuizQuestion.source_document_id == document_id)
         if difficulty is not None:

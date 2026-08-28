@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Float, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,3 +29,6 @@ class QuizAnswer(CreatedAtMixin, Base):
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     user_answer: Mapped[str] = mapped_column(Text, nullable=False)
     is_correct: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    similarity_score: Mapped[float | None] = mapped_column(Float)
+    score: Mapped[float | None] = mapped_column(Float)
+    feedback: Mapped[str | None] = mapped_column(Text)

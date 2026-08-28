@@ -2,29 +2,36 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable, Iterator, Sequence
+import time
+from collections.abc import Callable, Iterable, Iterator, Sequence
 
 import httpx
 
 from app.services.llm.base import (
+    EssayGrade,
     LLMConfigError,
     LLMError,
+    LLMUsageEvent,
     ProofreadFinding,
     QuizDraft,
     RagAnswer,
     RagContext,
 )
 from app.services.llm.prompts import (
+    ESSAY_GRADING_SYSTEM,
     KNOWN_CATEGORIES,
     QUERY_REWRITE_SYSTEM,
     RAG_SYSTEM,
     RAG_SYSTEM_STREAM,
+    SHORT_ANSWER_JUDGE_SYSTEM,
+    essay_grading_user_message,
     proofread_batch_system,
     proofread_system,
     query_rewrite_user_message,
     quiz_system,
     quiz_user_message,
     rag_user_message,
+    short_answer_judge_user_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,12 +49,14 @@ class OpenAILLMProvider:
         categories: Iterable[str] = ("spelling", "spacing"),
         timeout: float = 120.0,
         reasoning_effort: str | None = None,
+        on_usage: Callable[[LLMUsageEvent], None] | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._reasoning_effort = reasoning_effort
+        self._on_usage = on_usage
         self.name = f"openai:{model}"
 
         self._categories = [c for c in KNOWN_CATEGORIES if c in set(categories)] or [
@@ -58,7 +67,7 @@ class OpenAILLMProvider:
         self._batch_system = proofread_batch_system(self._categories)
 
     def proofread(self, text: str) -> list[ProofreadFinding]:
-        content = self._chat(self._system, text)
+        content = self._chat(self._system, text, feature="proofread")
         data = self._load_json(content)
         raw = data.get("findings", []) if isinstance(data, dict) else []
         return self._to_findings(raw)
@@ -68,7 +77,7 @@ class OpenAILLMProvider:
             return []
         # [번호] 마커로 여러 조각을 한 요청에 담는다.
         user = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(texts))
-        content = self._chat(self._batch_system, user)
+        content = self._chat(self._batch_system, user, feature="proofread_batch")
         data = self._load_json(content)
 
         out: list[list[ProofreadFinding]] = [[] for _ in texts]
@@ -86,7 +95,9 @@ class OpenAILLMProvider:
         if not history:
             return question
         user = query_rewrite_user_message(question, history)
-        rewritten = self._chat(QUERY_REWRITE_SYSTEM, user, json_mode=False).strip()
+        rewritten = self._chat(
+            QUERY_REWRITE_SYSTEM, user, json_mode=False, feature="rag_rewrite"
+        ).strip()
         return rewritten or question
 
     def answer_with_context(
@@ -100,7 +111,7 @@ class OpenAILLMProvider:
             [(c.index, c.label, c.content) for c in contexts],
             history or [],
         )
-        data = self._load_json(self._chat(RAG_SYSTEM, user))
+        data = self._load_json(self._chat(RAG_SYSTEM, user, feature="rag_answer"))
 
         answer = str(data.get("answer", "")).strip()
         if not answer:
@@ -137,12 +148,13 @@ class OpenAILLMProvider:
             [(c.index, c.label, c.content) for c in contexts],
             history or [],
         )
-        return self._chat_stream(RAG_SYSTEM_STREAM, user)
+        return self._chat_stream(RAG_SYSTEM_STREAM, user, feature="rag_answer_stream")
 
-    def _chat_stream(self, system: str, user: str) -> Iterator[str]:
+    def _chat_stream(self, system: str, user: str, *, feature: str) -> Iterator[str]:
         payload = {
             "model": self._model,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -150,6 +162,7 @@ class OpenAILLMProvider:
         }
         if self._reasoning_effort:
             payload["reasoning_effort"] = self._reasoning_effort
+        started = time.perf_counter()
         try:
             with httpx.stream(
                 "POST",
@@ -169,15 +182,36 @@ class OpenAILLMProvider:
                         obj = json.loads(data)
                     except json.JSONDecodeError:
                         continue
-                    delta = obj.get("choices", [{}])[0].get("delta", {}).get("content")
+                    usage = obj.get("usage")
+                    if usage:
+                        self._emit_usage(
+                            feature=feature,
+                            status="success",
+                            latency_ms=(time.perf_counter() - started) * 1000,
+                            usage=usage,
+                        )
+                    choices = obj.get("choices") or []
+                    delta = choices[0].get("delta", {}).get("content") if choices else None
                     if delta:
                         yield delta
         except httpx.HTTPStatusError as exc:
             exc.response.read()
+            self._emit_usage(
+                feature=feature,
+                status="fail",
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error_message=f"HTTP {exc.response.status_code}: {exc.response.text[:200]}",
+            )
             raise LLMError(
                 f"OpenAI 응답 오류 {exc.response.status_code}: {exc.response.text[:200]}"
             ) from exc
         except httpx.HTTPError as exc:
+            self._emit_usage(
+                feature=feature,
+                status="fail",
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error_message=str(exc)[:500],
+            )
             raise LLMError(f"OpenAI 호출 실패: {exc}") from exc
 
     def generate_quiz(
@@ -198,7 +232,7 @@ class OpenAILLMProvider:
             count=count,
             avoid_texts=avoid_texts or [],
         )
-        data = self._load_json(self._chat(system, user))
+        data = self._load_json(self._chat(system, user, feature="quiz_generate"))
 
         raw = data.get("questions", [])
         if not isinstance(raw, list):
@@ -249,9 +283,39 @@ class OpenAILLMProvider:
             )
         return drafts
 
+    def grade_essay(
+        self, *, question: str, model_answer: str, rubric: str, user_answer: str
+    ) -> EssayGrade:
+        user = essay_grading_user_message(
+            question=question, model_answer=model_answer, rubric=rubric, user_answer=user_answer
+        )
+        data = self._load_json(
+            self._chat(ESSAY_GRADING_SYSTEM, user, feature="quiz_grade_essay")
+        )
+
+        raw_score = data.get("score")
+        try:
+            score = min(100.0, max(0.0, float(raw_score)))
+        except (TypeError, ValueError):
+            raise LLMError(f"서술형 채점 응답의 score 가 숫자가 아닙니다: {raw_score!r}") from None
+        feedback = str(data.get("feedback", "")).strip()
+        return EssayGrade(score=score, feedback=feedback)
+
+    def judge_short_answer(self, *, question: str, correct_answer: str, user_answer: str) -> bool:
+        user = short_answer_judge_user_message(
+            question=question, correct_answer=correct_answer, user_answer=user_answer
+        )
+        data = self._load_json(
+            self._chat(SHORT_ANSWER_JUDGE_SYSTEM, user, feature="quiz_grade_short_answer")
+        )
+        raw = data.get("correct")
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() == "true"
+
     # ── 내부 ──
 
-    def _chat(self, system: str, user: str, *, json_mode: bool = True) -> str:
+    def _chat(self, system: str, user: str, *, feature: str, json_mode: bool = True) -> str:
         if not self._api_key:
             raise LLMConfigError("OPENAI_API_KEY 가 설정되지 않았습니다")
         payload = {
@@ -265,6 +329,7 @@ class OpenAILLMProvider:
             payload["response_format"] = {"type": "json_object"}
         if self._reasoning_effort:
             payload["reasoning_effort"] = self._reasoning_effort
+        started = time.perf_counter()
         try:
             resp = httpx.post(
                 f"{self._base_url}/chat/completions",
@@ -273,13 +338,60 @@ class OpenAILLMProvider:
                 timeout=self._timeout,
             )
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            body = resp.json()
+            self._emit_usage(
+                feature=feature,
+                status="success",
+                latency_ms=(time.perf_counter() - started) * 1000,
+                usage=body.get("usage"),
+            )
+            return body["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as exc:
+            self._emit_usage(
+                feature=feature,
+                status="fail",
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error_message=f"HTTP {exc.response.status_code}: {exc.response.text[:200]}",
+            )
             raise LLMError(
                 f"OpenAI 응답 오류 {exc.response.status_code}: {exc.response.text[:200]}"
             ) from exc
         except (httpx.HTTPError, KeyError, IndexError) as exc:
+            self._emit_usage(
+                feature=feature,
+                status="fail",
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error_message=str(exc)[:500],
+            )
             raise LLMError(f"OpenAI 호출 실패: {exc}") from exc
+
+    def _emit_usage(
+        self,
+        *,
+        feature: str,
+        status: str,
+        latency_ms: float,
+        usage: dict | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """계측 콜백 호출"""
+        if not self._on_usage:
+            return
+        try:
+            self._on_usage(
+                LLMUsageEvent(
+                    feature=feature,
+                    model=self._model,
+                    status=status,
+                    prompt_tokens=(usage or {}).get("prompt_tokens"),
+                    completion_tokens=(usage or {}).get("completion_tokens"),
+                    total_tokens=(usage or {}).get("total_tokens"),
+                    latency_ms=round(latency_ms, 1),
+                    error_message=error_message,
+                )
+            )
+        except Exception:
+            logger.exception("LLM usage 콜백 실행 실패 (feature=%s)", feature)
 
     @staticmethod
     def _load_json(content: str) -> dict:

@@ -158,6 +158,7 @@ QUIZ_TYPE_LABELS = {
     "SINGLE_CHOICE": "4지선다(객관식)",
     "TRUE_FALSE": "O/X",
     "SHORT_ANSWER": "단답형",
+    "ESSAY": "서술형(주관식 장문)",
 }
 
 QUIZ_DIFFICULTY_LABELS = {
@@ -199,6 +200,8 @@ def quiz_system(types: Iterable[str], difficulty: str | None = None) -> str:
         '정답 선택지의 **인덱스 문자열**("0"~"3")로 쓴다.\n'
         '- TRUE_FALSE: options 는 생략하고 correct_answer 는 "O" 또는 "X" 로 쓴다.\n'
         "- SHORT_ANSWER: options 는 생략하고 correct_answer 는 짧은 정답 표현(한 단어~한 구절)으로 쓴다.\n"
+        "- ESSAY: options 는 생략하고 correct_answer 는 모범답안(2~4문장)으로 쓴다. "
+        "explanation 에는 채점 시 반드시 포함돼야 할 핵심 요소를 채점기준으로 쓴다.\n"
         "반드시 다음 형태의 JSON 객체 하나만 출력한다(설명 문장 금지):\n"
         '{"questions": [{"type": "' + type_enum + '", "text": "문제 본문", '
         '"options": ["...", "...", "...", "..."], "correct_answer": "0", '
@@ -231,6 +234,57 @@ def quiz_user_message(
 
     parts.append(f"# 요구사항\n위 근거만 사용해 문항 {count}개를 만든다.")
     return "\n\n".join(parts)
+
+
+ESSAY_GRADING_SYSTEM = (
+    "너는 사내 교육용 서술형 문제를 채점하는 채점관이다. "
+    "문제, 모범답안, 채점기준, 응시자 답안이 주어지면 응시자 답안이 모범답안/채점기준의 "
+    "핵심 내용을 얼마나 담고 있는지만 근거로 0~100점을 매긴다.\n"
+    "규칙:\n"
+    "- 표현이 다르더라도 같은 의미면 감점하지 않는다(문장력·맞춤법은 채점하지 않는다).\n"
+    "- 모범답안/채점기준에 없는 내용을 추가로 요구하거나, 그 반대로 근거 없이 후하게 주지 않는다.\n"
+    "- 핵심 내용이 전혀 없으면 0점, 핵심을 정확히 다 담았으면 100점에 가깝게 준다.\n"
+    "- feedback 은 응시자에게 보여줄 채점 코멘트다. 무엇이 맞았고 무엇이 빠졌는지 1~3문장으로 "
+    "구체적으로 쓴다(단순히 '틀렸습니다' 금지).\n"
+    "반드시 다음 형태의 JSON 객체 하나만 출력한다(설명 문장 금지):\n"
+    '{"score": 0~100 사이 숫자, "feedback": "채점 코멘트"}'
+)
+
+
+def essay_grading_user_message(
+    *, question: str, model_answer: str, rubric: str, user_answer: str
+) -> str:
+    """서술형 채점 user 메시지. rubric 은 문항의 explanation(정답 근거/채점기준) 필드를 재사용한다."""
+    parts = [
+        f"# 문제\n{question}",
+        f"# 모범답안\n{model_answer}",
+    ]
+    if rubric and rubric.strip() != model_answer.strip():
+        parts.append(f"# 채점기준\n{rubric}")
+    parts.append(f"# 응시자 답안\n{user_answer or '(답안 없음)'}")
+    return "\n\n".join(parts)
+
+
+SHORT_ANSWER_JUDGE_SYSTEM = (
+    "너는 사내 교육용 단답형 문제의 채점을 최종 판정하는 심사관이다. "
+    "문제, 정답, 응시자 답안이 주어지면 응시자 답안이 정답과 사실상 같은 뜻인지 true/false 로만 "
+    "판정한다.\n"
+    "규칙:\n"
+    "- 표현·어순·조사가 달라도 같은 사실을 가리키면 true (예: '1년 근속' ↔ '1년 이상 계속 근로한').\n"
+    "- 숫자·기간·금액·대상 등 핵심 사실이 정답과 다르면(예: 1년 vs 3년) 반드시 false. "
+    "표현이 비슷해 보여도 사실이 다르면 오답이다 — 이게 가장 중요한 규칙이다.\n"
+    "- 정답의 핵심 요소 중 일부가 빠졌으면 false.\n"
+    "반드시 다음 형태의 JSON 객체 하나만 출력한다(설명 문장 금지): "
+    '{"correct": true 또는 false}'
+)
+
+
+def short_answer_judge_user_message(*, question: str, correct_answer: str, user_answer: str) -> str:
+    return (
+        f"# 문제\n{question}\n\n"
+        f"# 정답\n{correct_answer}\n\n"
+        f"# 응시자 답안\n{user_answer or '(답안 없음)'}"
+    )
 
 
 def proofread_batch_system(categories: Iterable[str]) -> str:

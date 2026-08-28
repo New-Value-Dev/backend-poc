@@ -1,3 +1,6 @@
+import logging
+import threading
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,6 +10,7 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 # Swagger UI 상단에 노출되는 API 전체 설명.
 API_DESCRIPTION = f"""
@@ -118,3 +122,38 @@ def _bootstrap_embedding_model() -> None:
         ensure_default_embedding_model(db, settings)
     finally:
         db.close()
+
+
+@app.on_event("startup")
+def _warm_embedding_model() -> None:
+    """활성 임베딩 모델을 백그라운드 스레드에서 미리 로드"""
+    from app.repositories.embedding_repository import EmbeddingModelRepository
+    from app.services.embedding.factory import get_embedding_provider
+
+    def _warm() -> None:
+        db = SessionLocal()
+        try:
+            model = EmbeddingModelRepository(db).get_active()
+            if model is None:
+                return
+            get_embedding_provider(settings, model).load()
+            logger.info("embedding model warmed up: %s", model.model_key)
+        except Exception:
+            logger.exception("embedding model warm-up 실패 — 첫 사용 시점에 지연 로딩됩니다")
+        finally:
+            db.close()
+
+    threading.Thread(target=_warm, daemon=True, name="embedding-warmup").start()
+
+
+@app.on_event("startup")
+def _start_quiz_due_reminder_scheduler() -> None:
+    """마감기한이 임박한 퀴즈의 미제출 지정자에게 주기적으로 리마인더를 보낸다"""
+    from app.services.quiz_reminder_service import run_due_reminder_loop
+
+    threading.Thread(
+        target=run_due_reminder_loop,
+        args=(settings.quiz_due_reminder_interval_seconds,),
+        daemon=True,
+        name="quiz-due-reminder",
+    ).start()

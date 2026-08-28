@@ -11,6 +11,7 @@ from fastapi import (
 )
 
 from app.api.deps import get_current_user, require_project_access
+from app.core.timeutil import format_kst
 from app.models.project import Project
 from app.models.quiz_book import QuizBook
 from app.models.quiz_generation_job import QuizGenerationJob
@@ -31,11 +32,18 @@ from app.schemas.quiz import (
     QuizQuestionType,
     QuizQuestionUpdate,
     QuizReviewStatus,
+    QuizSessionDraftRead,
     QuizSessionRead,
     QuizSessionResult,
     QuizSessionStart,
     QuizSessionStartResponse,
+    QuizSessionStatus,
     QuizSessionSubmit,
+)
+from app.services.notification_service import (
+    NotificationService,
+    NotificationType,
+    get_notification_service,
 )
 from app.services.project_service import (
     ProjectForbiddenError,
@@ -52,12 +60,15 @@ from app.services.quiz_generation_service import (
     run_quiz_generation_task,
 )
 from app.services.quiz_service import (
+    QuizAssigneeNotProjectMemberError,
+    QuizBookForbiddenError,
     QuizBookLockedError,
     QuizBookNotFoundError,
     QuizQuestionNotFoundError,
     QuizService,
     QuizSessionAlreadySubmittedError,
     QuizSessionNotFoundError,
+    can_manage_quiz_book,
     get_quiz_service,
 )
 
@@ -116,6 +127,18 @@ def check_quiz_book_access(
     _check_project_access(
         book.project_id, projects, current_user, f"Quiz book {quiz_book_id} not found"
     )
+    return book
+
+
+def require_quiz_book_manager(
+    book: QuizBook = Depends(check_quiz_book_access),
+    current_user: User = Depends(get_current_user),
+) -> QuizBook:
+    """설정/문제 구성을 바꾸는 라우트 전용"""
+    if not can_manage_quiz_book(book, current_user):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "이 문제집을 만든 사람 또는 프로젝트 소유자만 관리할 수 있습니다"
+        )
     return book
 
 
@@ -219,6 +242,7 @@ def check_quiz_generation_job_access(
     responses={
         **AUTH_RESPONSES,
         404: {"description": "프로젝트/문제집 없음, 또는 문서가 이 프로젝트 소속이 아님"},
+        403: {"description": "이 문제집을 만든 사람 또는 프로젝트 소유자가 아님(quiz_book_id 지정 시)"},
         409: {"description": "대상 문서에 청크가 없음(파싱/청킹 전), 또는 문제집에 응시 이력이 있음"},
         **FORBIDDEN_RESPONSE,
     },
@@ -233,13 +257,17 @@ def generate_quiz_questions(
 ) -> QuizGenerationJob:
     """지정한 문서들로 문제를 생성"""
     try:
-        job = service.start(project_id, current_user.id, payload)
+        job = service.start(project_id, current_user, payload)
     except NoChunksError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
     except QuizBookLockedError:
         raise HTTPException(status.HTTP_409_CONFLICT, LOCKED_RESPONSE) from None
     except QuizBookNotFoundError:
         raise _not_found(f"Quiz book {payload.quiz_book_id} not found") from None
+    except QuizBookForbiddenError:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "이 문제집을 만든 사람 또는 프로젝트 소유자만 관리할 수 있습니다"
+        ) from None
     except DocumentNotInProjectError as exc:
         raise _not_found(f"Document {exc.document_id} not found in this project") from None
 
@@ -273,9 +301,25 @@ def get_quiz_generation_job(
 def list_quiz_books(
     project_id: ProjectIdPath,
     service: QuizService = Depends(get_quiz_service),
+    current_user: User = Depends(get_current_user),
     _: Project = Depends(require_project_access),
 ) -> list[QuizBookRead]:
-    return service.list_books(project_id)
+    return service.list_books(project_id, current_user)
+
+
+def _notify_quiz_assigned(
+    notifications: NotificationService, book: QuizBookRead, user_ids: list[int]
+) -> None:
+    body = f"마감: {format_kst(book.due_at)}" if book.due_at else None
+    for user_id in user_ids:
+        notifications.notify(
+            user_id,
+            type=NotificationType.QUIZ_ASSIGNED,
+            title=f"'{book.title}' 퀴즈가 배정되었습니다",
+            body=body,
+            url=f"/quiz/{book.id}/take",
+            meta={"quiz_book_id": book.id, "project_id": book.project_id},
+        )
 
 
 @router.post(
@@ -283,15 +327,34 @@ def list_quiz_books(
     response_model=QuizBookRead,
     status_code=status.HTTP_201_CREATED,
     summary="문제집 생성",
-    responses={**AUTH_RESPONSES, 404: {"description": "프로젝트 없음"}, **FORBIDDEN_RESPONSE},
+    response_description="`assignee_user_ids`를 지정하면 생성 즉시 해당 사용자에게 알림이 발송된다",
+    responses={
+        **AUTH_RESPONSES,
+        404: {"description": "프로젝트 없음"},
+        400: {
+            "description": "assignee_user_ids 중 지정할 수 없는 사용자가 있음"
+            "(비공개/초대 프로젝트: 활성 멤버가 아님, 공개 프로젝트: 존재하는 활성 사용자가 아님)"
+        },
+        **FORBIDDEN_RESPONSE,
+    },
 )
 def create_quiz_book(
     project_id: ProjectIdPath,
     payload: QuizBookCreate,
     service: QuizService = Depends(get_quiz_service),
+    notifications: NotificationService = Depends(get_notification_service),
+    current_user: User = Depends(get_current_user),
     _: Project = Depends(require_project_access),
 ) -> QuizBookRead:
-    return service.create_book(project_id, payload)
+    try:
+        outcome = service.create_book(project_id, payload, current_user)
+    except QuizAssigneeNotProjectMemberError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"지정한 사용자 중 응시자로 지정할 수 없는 사용자가 있습니다: {exc.user_ids}",
+        ) from None
+    _notify_quiz_assigned(notifications, outcome.book, outcome.notify_user_ids)
+    return outcome.book
 
 
 @router.get(
@@ -302,31 +365,47 @@ def create_quiz_book(
 )
 def get_quiz_book(
     service: QuizService = Depends(get_quiz_service),
+    current_user: User = Depends(get_current_user),
     book: QuizBook = Depends(check_quiz_book_access),
 ) -> QuizBookRead:
-    return service.get_book_read(book.id)
+    return service.get_book_read(book.id, current_user)
 
 
 @router.patch(
     "/quizzes/{quiz_book_id}",
     response_model=QuizBookRead,
     summary="문제집 설정 수정",
+    response_description="assignee_user_ids를 보내면 전체 지정자 목록이 그걸로 교체되고,"
+    " 새로 추가된 사용자에게만 알림이 발송된다(기존 지정자는 재발송 안 함)",
     responses={
         **AUTH_RESPONSES,
         404: {"description": "문제집 없음"},
+        403: {"description": "이 문제집을 만든 사람 또는 프로젝트 소유자가 아님"},
         409: {"description": "응시 이력이 있어 수정할 수 없음 — /duplicate 로 복제할 것"},
-        **FORBIDDEN_RESPONSE,
+        400: {
+            "description": "assignee_user_ids 중 지정할 수 없는 사용자가 있음"
+            "(비공개/초대 프로젝트: 활성 멤버가 아님, 공개 프로젝트: 존재하는 활성 사용자가 아님)"
+        },
     },
 )
 def update_quiz_book(
     payload: QuizBookUpdate,
     service: QuizService = Depends(get_quiz_service),
-    book: QuizBook = Depends(check_quiz_book_access),
+    notifications: NotificationService = Depends(get_notification_service),
+    current_user: User = Depends(get_current_user),
+    book: QuizBook = Depends(require_quiz_book_manager),
 ) -> QuizBookRead:
     try:
-        return service.update_book(book.id, payload)
+        outcome = service.update_book(book.id, payload, current_user)
     except QuizBookLockedError:
         raise HTTPException(status.HTTP_409_CONFLICT, LOCKED_RESPONSE) from None
+    except QuizAssigneeNotProjectMemberError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"지정한 사용자 중 응시자로 지정할 수 없는 사용자가 있습니다: {exc.user_ids}",
+        ) from None
+    _notify_quiz_assigned(notifications, outcome.book, outcome.notify_user_ids)
+    return outcome.book
 
 
 @router.delete(
@@ -334,11 +413,15 @@ def update_quiz_book(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="문제집 삭제",
     response_description="본문 없음(204). 응시 이력이 있어도 삭제는 허용되며, 세션/답변도 함께 삭제된다",
-    responses={**AUTH_RESPONSES, 404: {"description": "문제집 없음"}, **FORBIDDEN_RESPONSE},
+    responses={
+        **AUTH_RESPONSES,
+        404: {"description": "문제집 없음"},
+        403: {"description": "이 문제집을 만든 사람 또는 프로젝트 소유자가 아님"},
+    },
 )
 def delete_quiz_book(
     service: QuizService = Depends(get_quiz_service),
-    book: QuizBook = Depends(check_quiz_book_access),
+    book: QuizBook = Depends(require_quiz_book_manager),
 ) -> None:
     service.delete_book(book.id)
 
@@ -353,9 +436,10 @@ def delete_quiz_book(
 )
 def duplicate_quiz_book(
     service: QuizService = Depends(get_quiz_service),
+    current_user: User = Depends(get_current_user),
     book: QuizBook = Depends(check_quiz_book_access),
 ) -> QuizBookRead:
-    return service.duplicate_book(book.id)
+    return service.duplicate_book(book.id, current_user)
 
 
 @router.get(
@@ -380,14 +464,14 @@ def list_quiz_book_questions(
     responses={
         **AUTH_RESPONSES,
         404: {"description": "문제집 없음"},
+        403: {"description": "이 문제집을 만든 사람 또는 프로젝트 소유자가 아님"},
         409: {"description": "응시 이력이 있어 수정할 수 없음 — /duplicate 로 복제할 것"},
-        **FORBIDDEN_RESPONSE,
     },
 )
 def add_quiz_book_questions(
     payload: QuizBookQuestionsAdd,
     service: QuizService = Depends(get_quiz_service),
-    book: QuizBook = Depends(check_quiz_book_access),
+    book: QuizBook = Depends(require_quiz_book_manager),
 ) -> list[QuizQuestion]:
     try:
         return service.add_questions_to_book(book.id, payload.question_ids)
@@ -403,14 +487,14 @@ def add_quiz_book_questions(
     responses={
         **AUTH_RESPONSES,
         404: {"description": "문제집 없음"},
+        403: {"description": "이 문제집을 만든 사람 또는 프로젝트 소유자가 아님"},
         409: {"description": "응시 이력이 있어 수정할 수 없음 — /duplicate 로 복제할 것"},
-        **FORBIDDEN_RESPONSE,
     },
 )
 def remove_quiz_book_question(
     question_id: QuestionIdPath,
     service: QuizService = Depends(get_quiz_service),
-    book: QuizBook = Depends(check_quiz_book_access),
+    book: QuizBook = Depends(require_quiz_book_manager),
 ) -> None:
     try:
         service.remove_question_from_book(book.id, question_id)
@@ -425,8 +509,9 @@ def remove_quiz_book_question(
     "/quizzes/{quiz_book_id}/sessions",
     response_model=QuizSessionStartResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="응시 시작",
-    response_description="정답이 빠진 문제 목록 + session_id",
+    summary="응시 시작 (진행중 세션이 있으면 재개)",
+    response_description="정답이 빠진 문제 목록 + session_id. 이미 진행중인 세션이 있으면"
+    " 새로 만들지 않고 그 세션을 그대로 돌려준다(resumed=true, 문항 순서 동일)",
     responses={**AUTH_RESPONSES, 404: {"description": "문제집 없음"}, **FORBIDDEN_RESPONSE},
 )
 def start_quiz_session(
@@ -435,8 +520,50 @@ def start_quiz_session(
     current_user: User = Depends(get_current_user),
     book: QuizBook = Depends(check_quiz_book_access),
 ) -> QuizSessionStartResponse:
-    session, questions = service.start_session(book.id, current_user.id, payload.mode.value)
-    return QuizSessionStartResponse(session_id=session.id, mode=session.mode, questions=questions)
+    session, questions, answers, resumed, draft_answers = service.start_session(
+        book.id, current_user.id, payload.mode.value
+    )
+    return QuizSessionStartResponse(
+        session_id=session.id,
+        mode=session.mode,
+        questions=questions,
+        resumed=resumed,
+        answers=answers,
+        draft_answers=draft_answers,
+    )
+
+
+@router.patch(
+    "/quizzes/{quiz_book_id}/sessions/{session_id}/draft",
+    response_model=QuizSessionDraftRead,
+    summary="exam 모드 자동저장 (채점 없이 답만 저장)",
+    response_description="저장 후 이 세션의 전체 임시 답안 맵",
+    responses={
+        **AUTH_RESPONSES,
+        404: {"description": "세션 또는 문제 없음"},
+        409: {"description": "이미 제출된 세션"},
+        **FORBIDDEN_RESPONSE,
+    },
+)
+def save_quiz_draft_answer(
+    session_id: SessionIdPath,
+    payload: QuizAnswerSubmit,
+    service: QuizService = Depends(get_quiz_service),
+    current_user: User = Depends(get_current_user),
+    book: QuizBook = Depends(check_quiz_book_access),
+) -> QuizSessionDraftRead:
+    """exam 모드에서 답을 고를 때마다 호출"""
+    try:
+        draft = service.save_draft_answer(
+            book.id, session_id, current_user.id, payload.question_id, payload.user_answer
+        )
+    except QuizSessionNotFoundError:
+        raise _not_found(f"Quiz session {session_id} not found") from None
+    except QuizQuestionNotFoundError:
+        raise _not_found(f"Quiz question {payload.question_id} not found in this quiz book") from None
+    except QuizSessionAlreadySubmittedError:
+        raise HTTPException(status.HTTP_409_CONFLICT, "이미 제출된 세션입니다") from None
+    return QuizSessionDraftRead(draft_answers=draft)
 
 
 @router.post(
@@ -499,21 +626,30 @@ def submit_quiz_session(
     "/quizzes/{quiz_book_id}/sessions",
     response_model=list[QuizSessionRead],
     summary="문제집별 응시 이력",
-    response_description="이 문제집을 응시한 모든 사용자의 세션 요약(결과 탭용) — 문항별 답변은 상세 조회로",
+    response_description="문제집 관리자면 이 문제집을 응시한 모든 사용자의 세션 요약(이름 포함)."
+    " 관리자가 아니면 본인 세션만 — 문항별 답변은 상세 조회로",
     responses={**AUTH_RESPONSES, 404: {"description": "문제집 없음"}, **FORBIDDEN_RESPONSE},
 )
 def list_quiz_book_sessions(
+    status_filter: Annotated[
+        QuizSessionStatus | None, Query(alias="status", description="지정하면 그 상태만")
+    ] = None,
     service: QuizService = Depends(get_quiz_service),
+    current_user: User = Depends(get_current_user),
     book: QuizBook = Depends(check_quiz_book_access),
 ) -> list:
-    return service.get_book_sessions(book.id)
+    return service.get_book_sessions(
+        book.id, current_user, status=status_filter.value if status_filter else None
+    )
 
 
 @router.get(
     "/quizzes/{quiz_book_id}/sessions/{session_id}",
     response_model=QuizSessionResult,
     summary="세션 상세 (오답노트)",
-    responses={**AUTH_RESPONSES, 404: {"description": "세션 없음"}, **FORBIDDEN_RESPONSE},
+    response_description="본인 세션이거나 문제집 관리자면 조회 가능. 관리자가 남의 세션을 볼 때는"
+    " reveal_answers 설정과 무관하게 정답/해설이 항상 보인다",
+    responses={**AUTH_RESPONSES, 404: {"description": "세션 없음(남의 세션이고 관리자도 아니면 404)"}, **FORBIDDEN_RESPONSE},
 )
 def get_quiz_session(
     session_id: SessionIdPath,
@@ -522,7 +658,7 @@ def get_quiz_session(
     book: QuizBook = Depends(check_quiz_book_access),
 ) -> QuizSessionResult:
     try:
-        return service.get_session_detail(book.id, session_id, current_user.id)
+        return service.get_session_detail(book.id, session_id, current_user)
     except QuizSessionNotFoundError:
         raise _not_found(f"Quiz session {session_id} not found") from None
 
@@ -531,13 +667,19 @@ def get_quiz_session(
     "/projects/{project_id}/quiz-sessions",
     response_model=list[QuizSessionRead],
     summary="내 응시 이력 (문제집 전체)",
-    response_description="이 프로젝트 안에서 내가 응시한 모든 세션 요약",
+    response_description="이 프로젝트 안에서 내가 응시한 모든 세션 요약"
+    " — status=IN_PROGRESS 로 필터하면 '이어서 풀기' 목록으로 쓸 수 있다",
     responses={**AUTH_RESPONSES, 404: {"description": "프로젝트 없음"}, **FORBIDDEN_RESPONSE},
 )
 def list_my_quiz_sessions(
     project_id: ProjectIdPath,
+    status_filter: Annotated[
+        QuizSessionStatus | None, Query(alias="status", description="지정하면 그 상태만")
+    ] = None,
     service: QuizService = Depends(get_quiz_service),
     current_user: User = Depends(get_current_user),
     _: Project = Depends(require_project_access),
 ) -> list:
-    return service.get_project_sessions(project_id, current_user.id)
+    return service.get_project_sessions(
+        project_id, current_user.id, status=status_filter.value if status_filter else None
+    )

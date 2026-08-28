@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.mixins import TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.user import User
 
 MODE_STUDY = "study"
 MODE_EXAM = "exam"
@@ -40,3 +45,16 @@ class QuizSession(TimestampMixin, Base):
     score: Mapped[float | None] = mapped_column(Float)
     correct_count: Mapped[int | None] = mapped_column(Integer)
     total_count: Mapped[int | None] = mapped_column(Integer)
+    question_order: Mapped[list[int] | None] = mapped_column(JSONB)
+    draft_answers: Mapped[dict[str, str] | None] = mapped_column(JSONB)
+
+    user: Mapped[User] = relationship()
+
+    @property
+    def user_name(self) -> str | None:
+        """문제집 관리자용 응시자 목록에 이름을 보여주기 위한 편의 필드"""
+        return self.user.name if self.user else None
+
+    @property
+    def user_email(self) -> str | None:
+        return self.user.email if self.user else None

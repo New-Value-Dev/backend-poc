@@ -35,6 +35,7 @@ from app.services.activity_service import (
 )
 from app.services.document_service import DocumentNotFoundError, VersionNotFoundError
 from app.services.llm import LLMError, LLMProvider, get_llm_provider
+from app.services.llm_usage_service import usage_sink
 from app.services.notification_service import (
     NotificationType,
     notification_service_for,
@@ -171,7 +172,6 @@ def run_text_proofread_task(job_id: int, content: str) -> None:
     try:
         settings = get_settings()
         jobs = TextProofreadJobRepository(db)
-        provider = get_llm_provider(settings)
         notifications = notification_service_for(db, settings)
 
         job = jobs.get(job_id)
@@ -179,6 +179,9 @@ def run_text_proofread_task(job_id: int, content: str) -> None:
             logger.warning("run_text_proofread_task: job %s not found", job_id)
             return
         user_id = job.user_id
+        provider = get_llm_provider(
+            settings, on_usage=usage_sink(db, user_id=user_id, project_id=None)
+        )
 
         def notify(notification_type: str, count: int = 0, **meta) -> None:
             title, body = _TEXT_NOTIFY_MESSAGES[notification_type](count)
@@ -375,7 +378,6 @@ def run_proofread_task(analysis_id: int) -> None:
         analyses = AiAnalysisResultRepository(db)
         versions = DocumentVersionRepository(db)
         documents = DocumentRepository(db)
-        provider = get_llm_provider(settings)
 
         record = analyses.get(analysis_id)
         if record is None:
@@ -390,6 +392,12 @@ def run_proofread_task(analysis_id: int) -> None:
             else None
         )
         actor = UserRepository(db).get(actor_id) if actor_id else None
+        provider = get_llm_provider(
+            settings,
+            on_usage=usage_sink(
+                db, user_id=actor_id, project_id=doc.project_id if doc else None
+            ),
+        )
         activity = activity_service_for(db, actor=actor)
         notifications = notification_service_for(db, settings)
 

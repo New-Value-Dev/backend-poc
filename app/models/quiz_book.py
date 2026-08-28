@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -11,6 +12,7 @@ from app.models.mixins import TimestampMixin
 
 if TYPE_CHECKING:
     from app.models.project import Project
+    from app.models.user import User
 
 
 class QuizBook(TimestampMixin, Base):
@@ -22,6 +24,9 @@ class QuizBook(TimestampMixin, Base):
     project_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL")
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     # 표시/스코프용 참고 정보일 뿐 — 실제 소속 문항은 quiz_book_questions
@@ -32,5 +37,6 @@ class QuizBook(TimestampMixin, Base):
     shuffle_options: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     allow_retake: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     reveal_answers: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     project: Mapped[Project] = relationship()

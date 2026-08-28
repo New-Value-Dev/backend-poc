@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
-from app.services.llm.base import ProofreadFinding, QuizDraft, RagAnswer, RagContext
+from app.services.llm.base import EssayGrade, ProofreadFinding, QuizDraft, RagAnswer, RagContext
 
 # 키 없이도 데모가 되도록 하는 아주 단순한 규칙 사전
 # 실제 교정은 OpenAILLMProvider(GPT)가 담당하고 이건 개발/폴백용
@@ -123,7 +123,9 @@ class MockLLMProvider:
         if not contexts or count <= 0:
             return []
 
-        allowed = [t for t in ("SINGLE_CHOICE", "TRUE_FALSE", "SHORT_ANSWER") if t in set(types)]
+        allowed = [
+            t for t in ("SINGLE_CHOICE", "TRUE_FALSE", "SHORT_ANSWER", "ESSAY") if t in set(types)
+        ]
         allowed = allowed or ["SINGLE_CHOICE"]
         # avoid_texts 는 일부러 무시한다
 
@@ -167,3 +169,29 @@ class MockLLMProvider:
                 )
             drafts.append(draft)
         return drafts
+
+    def grade_essay(
+        self, *, question: str, model_answer: str, rubric: str, user_answer: str
+    ) -> EssayGrade:
+        """실제 채점은 GPT의 몫이므로 흉내내지 않고 모범답안과의 단어 겹침 비율로 대충 점수만"""
+        model_words = set(model_answer.split())
+        given_words = set((user_answer or "").split())
+        if not model_words or not given_words:
+            score = 0.0
+        else:
+            score = round(len(model_words & given_words) / len(model_words) * 100, 1)
+        return EssayGrade(
+            score=score,
+            feedback=(
+                f"[mock provider] 모범답안과 겹치는 단어 비율로 매긴 임시 점수입니다({score}점). "
+                "실제 채점은 OPENAI_API_KEY 를 설정하면 GPT가 수행합니다."
+            ),
+        )
+
+    def judge_short_answer(self, *, question: str, correct_answer: str, user_answer: str) -> bool:
+        """실제 판정은 GPT의 몫이므로 흉내내지 않고 단어 겹침 비율이 절반 이상이면 정답으로"""
+        correct_words = set(correct_answer.split())
+        given_words = set((user_answer or "").split())
+        if not correct_words or not given_words:
+            return False
+        return len(correct_words & given_words) / len(correct_words) >= 0.5

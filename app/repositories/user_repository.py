@@ -38,6 +38,13 @@ class UserRepository:
     def get_by_email(self, email: str) -> User | None:
         return self.db.scalar(select(User).where(User.email == email))
 
+    def list_active_ids(self, user_ids: set[int]) -> set[int]:
+        """주어진 id 중 실제로 존재하고 활성 상태인 사용자의 id만 골라 돌려준다."""
+        if not user_ids:
+            return set()
+        stmt = select(User.id).where(User.id.in_(user_ids), User.is_active.is_(True))
+        return set(self.db.scalars(stmt))
+
     def search(
         self,
         query: str,

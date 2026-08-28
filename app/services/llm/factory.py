@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from app.core.config import Settings
-from app.services.llm.base import LLMProvider
+from app.services.llm.base import LLMProvider, LLMUsageEvent
 from app.services.llm.mock_provider import MockLLMProvider
 from app.services.llm.openai_provider import OpenAILLMProvider
 
 
-def get_llm_provider(settings: Settings) -> LLMProvider:
+def get_llm_provider(
+    settings: Settings,
+    *,
+    on_usage: Callable[[LLMUsageEvent], None] | None = None,
+) -> LLMProvider:
     """설정에 따라 LLM provider를 고름
 
     - llm_provider="mock" → 항상 규칙 기반 Mock
@@ -23,5 +29,6 @@ def get_llm_provider(settings: Settings) -> LLMProvider:
             base_url=settings.openai_base_url,
             categories=settings.proofread_categories,
             reasoning_effort=settings.openai_reasoning_effort,
+            on_usage=on_usage,
         )
     return MockLLMProvider()
