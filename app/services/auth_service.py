@@ -24,7 +24,7 @@ class AuthService:
                 name=identity.name,
                 provider=identity.provider,
                 provider_sub=identity.sub,
-                role="member",
+                role="admin" if identity.provider == "mock" else "member",
             )
         else:
             if identity.name:
