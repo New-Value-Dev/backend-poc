@@ -6,8 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
-    app_name: str = "사이드프로젝트 API"
-    app_description: str = "사이드프로젝트 백엔드 API"
+    app_name: str = "AX Module Project API"
+    app_description: str = "AX Module Project 백엔드 API"
     app_version: str = "0.1.0"
     api_prefix: str = "/api/v1"
 
@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     proofread_batch_max_chars: int = 6000
     proofread_batch_max_sections: int = 40
     proofread_batch_concurrency: int = 4  # 배치 호출 동시 실행 수. 섹션이 많은 문서는 배치가 수십 개로 나뉘어 순차 호출 시 매우 느려짐
+    # 자유 텍스트 검사(/text/proofread)용 배치 크기. 문서 배치(6000자)보다 훨씬 작게 잡아야
+    # proofread_max_chars_per_section(4000자) 이내의 글도 여러 배치로 쪼개져 병렬 호출된다.
+    proofread_text_batch_max_chars: int = 1200
 
     # ── 퀴즈 AI 생성 ──
     # 출제는 검색(질의→top_k)이 아니라 커버리지 문제라 벡터 검색을 쓰지 않는다 — 대상 문서의

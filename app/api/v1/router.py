@@ -14,6 +14,7 @@ from app.api.v1.projects import router as projects_router
 from app.api.v1.push import router as push_router
 from app.api.v1.quiz import router as quiz_router
 from app.api.v1.rag import router as rag_router
+from app.api.v1.url_import import router as url_import_router
 from app.api.v1.users import router as users_router
 
 api_router = APIRouter()
@@ -27,6 +28,7 @@ api_router.include_router(folders_router)
 api_router.include_router(documents_router)
 api_router.include_router(embedding_router)
 api_router.include_router(proofread_router)
+api_router.include_router(url_import_router)
 api_router.include_router(quiz_router)
 api_router.include_router(rag_router)
 api_router.include_router(push_router)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Iterator
 
@@ -154,6 +155,14 @@ def build_text_job_result(job: TextProofreadJobModel) -> TextProofreadJobRead:
     )
 
 
+_BLOCK_SPLIT_RE = re.compile(r"\n\s*\n+")
+
+
+def _split_text_blocks(text: str) -> list[str]:
+    """빈 줄 기준으로 문단(= URL 임포트가 만든 태그 단위 블록)을 나눈다."""
+    return [b.strip() for b in _BLOCK_SPLIT_RE.split(text) if b.strip()]
+
+
 _TEXT_NOTIFY_MESSAGES = {
     NotificationType.TEXT_PROOFREAD_COMPLETE: lambda count: (
         "맞춤법 검사 완료",
@@ -196,7 +205,27 @@ def run_text_proofread_task(job_id: int, content: str) -> None:
 
         try:
             text = content.strip()
-            raw = provider.proofread(text) if text else []
+            blocks = _split_text_blocks(text) if text else []
+            items = list(enumerate(blocks))
+            batches = list(
+                _iter_batches(
+                    items,
+                    settings.proofread_text_batch_max_chars,
+                    settings.proofread_batch_max_sections,
+                )
+            )
+
+            def _run_batch(batch: list[tuple]) -> list:
+                return provider.proofread_batch([t for _, t in batch])
+
+            raw: list = []
+            with ThreadPoolExecutor(
+                max_workers=min(settings.proofread_batch_concurrency, len(batches) or 1)
+            ) as pool:
+                for batch_out in pool.map(_run_batch, batches) if batches else []:
+                    for fs in batch_out:
+                        raw.extend(fs)
+
             findings = [
                 TextProofreadFinding(
                     id=f"f{i}",
