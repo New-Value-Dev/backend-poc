@@ -29,6 +29,8 @@ def get_llm_provider(
             base_url=settings.openai_base_url,
             categories=settings.proofread_categories,
             reasoning_effort=settings.openai_reasoning_effort,
+            proofread_reasoning_effort=settings.proofread_reasoning_effort,
+            proper_nouns=settings.proofread_proper_nouns,
             on_usage=on_usage,
         )
     return MockLLMProvider()

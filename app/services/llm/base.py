@@ -23,6 +23,8 @@ class ProofreadFinding:
     reason: str  # 교정 이유(사용자 노출)
     # spelling(맞춤법) / spacing(띄어쓰기) / grammar(문법) / expression(표현)
     category: str = "spelling"
+    # original 이 원문 안에서 몇 번째로 나오는지(1부터). 같은 표현이 여러 번 나올 때 위치를 가린다.
+    occurrence: int = 1
 
 
 @dataclass

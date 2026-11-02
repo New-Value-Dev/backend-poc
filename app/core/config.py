@@ -92,13 +92,20 @@ class Settings(BaseSettings):
     openai_usage_api_key_id: str | None = None
     openai_reasoning_effort: str | None = None  # gpt-5.x 추론 강도(minimal|low|medium|high). low 는 속도 개선 없이 사이시옷 등 실제 오류를 놓쳐 기본값은 미지정(모델 기본 추론)으로 되돌림
     llm_provider: str = "auto"
-    proofread_categories: list[str] = ["spelling", "spacing"] 
-    proofread_max_chars_per_section: int = 4000
+    # 교정 카테고리(spelling|spacing|grammar|expression). 관리자 화면 없이 .env 로만 정한다.
+    proofread_categories: list[str] = ["spelling", "spacing"]
+    # 교정 전용 추론 강도(auto|none|low). openai_reasoning_effort 와 별개로 교정 호출에만 적용된다.
+    # auto: 문법·표현 카테고리가 켜져 있으면 low, 아니면 none(temperature 0으로 결과 고정).
+    proofread_reasoning_effort: str = "auto"
+    # 오타로 지적하지 않을 고유명사(JSON 배열). 이 단어를 건드리는 교정은 후처리에서도 버린다.
+    proofread_proper_nouns: list[str] = []
+    # 한 번에 검사할 수 있는 본문 최대 글자 수(자유 텍스트는 초과 시 거절, 문서는 섹션별로 이 길이까지만 검사).
+    proofread_max_chars_per_section: int = 15000
     proofread_batch_max_chars: int = 6000
     proofread_batch_max_sections: int = 40
     proofread_batch_concurrency: int = 4  # 배치 호출 동시 실행 수. 섹션이 많은 문서는 배치가 수십 개로 나뉘어 순차 호출 시 매우 느려짐
     # 자유 텍스트 검사(/text/proofread)용 배치 크기. 문서 배치(6000자)보다 훨씬 작게 잡아야
-    # proofread_max_chars_per_section(4000자) 이내의 글도 여러 배치로 쪼개져 병렬 호출된다.
+    # proofread_max_chars_per_section(15000자) 이내의 글도 여러 배치로 쪼개져 병렬 호출된다.
     proofread_text_batch_max_chars: int = 1200
 
     # ── 퀴즈 AI 생성 ──

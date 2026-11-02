@@ -17,16 +17,18 @@ from app.services.llm.base import (
     RagAnswer,
     RagContext,
 )
+from app.services.llm.finding_filter import parse_finding
 from app.services.llm.prompts import (
+    DEFAULT_REASONS,
     ESSAY_GRADING_SYSTEM,
-    KNOWN_CATEGORIES,
     QUERY_REWRITE_SYSTEM,
     RAG_SYSTEM,
     RAG_SYSTEM_STREAM,
     SHORT_ANSWER_JUDGE_SYSTEM,
+    active_categories,
     essay_grading_user_message,
-    proofread_batch_system,
-    proofread_system,
+    proofread_output_format,
+    proofread_prompt,
     query_rewrite_user_message,
     quiz_system,
     quiz_user_message,
@@ -35,6 +37,14 @@ from app.services.llm.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+_PROOFREAD_EFFORT_CHOICES = ("auto", "none", "low")
+# 추론 토큰도 max_output_tokens 에 포함되므로 추론을 켜면 JSON 출력 몫과 별도로 여유를 둔다.
+_PROOFREAD_REASONING_TOKEN_HEADROOM = 6000
+_PROOFREAD_MAX_OUTPUT_TOKENS = 16000
+_PROOFREAD_NO_REASONING_MAX_OUTPUT_TOKENS = 8000
+# reasoning 파라미터를 받는 모델 계열(gpt-4o 등은 보내면 400)
+_REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 
 
 class OpenAILLMProvider:
@@ -49,6 +59,8 @@ class OpenAILLMProvider:
         categories: Iterable[str] = ("spelling", "spacing"),
         timeout: float = 120.0,
         reasoning_effort: str | None = None,
+        proofread_reasoning_effort: str = "auto",
+        proper_nouns: Iterable[str] = (),
         on_usage: Callable[[LLMUsageEvent], None] | None = None,
     ) -> None:
         self._api_key = api_key
@@ -59,37 +71,80 @@ class OpenAILLMProvider:
         self._on_usage = on_usage
         self.name = f"openai:{model}"
 
-        self._categories = [c for c in KNOWN_CATEGORIES if c in set(categories)] or [
-            "spelling"
-        ]
+        self._categories = active_categories(categories)
         self._allowed = set(self._categories)
-        self._system = proofread_system(self._categories)
-        self._batch_system = proofread_batch_system(self._categories)
+        self._proper_nouns = [p.strip() for p in proper_nouns if p and p.strip()]
+
+        effort_setting = (proofread_reasoning_effort or "auto").strip().lower()
+        if effort_setting not in _PROOFREAD_EFFORT_CHOICES:
+            logger.warning(
+                "PROOFREAD_REASONING_EFFORT=%r 는 지원하지 않는 값이라 auto 를 사용한다 (허용: %s)",
+                proofread_reasoning_effort,
+                ", ".join(_PROOFREAD_EFFORT_CHOICES),
+            )
+            effort_setting = "auto"
+        if effort_setting == "auto":
+            # 맞춤법·띄어쓰기는 기계적으로 판정되는 항목이라 추론을 켜도 정확도는 그대로고
+            # 느려지기만 한다(실측). 문맥 판단이 필요한 문법·표현이 켜져 있을 때만 low 를 쓴다.
+            effort_setting = (
+                "low"
+                if any(c in ("grammar", "expression") for c in self._categories)
+                else "none"
+            )
+        self._proofread_effort = effort_setting
 
     def proofread(self, text: str) -> list[ProofreadFinding]:
-        content = self._chat(self._system, text, feature="proofread")
-        data = self._load_json(content)
-        raw = data.get("findings", []) if isinstance(data, dict) else []
-        return self._to_findings(raw)
+        return self.proofread_batch([text])[0]
 
     def proofread_batch(self, texts: list[str]) -> list[list[ProofreadFinding]]:
         if not texts:
             return []
-        # [번호] 마커로 여러 조각을 한 요청에 담는다.
-        user = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(texts))
-        content = self._chat(self._batch_system, user, feature="proofread_batch")
-        data = self._load_json(content)
+
+        prompt = proofread_prompt(texts, self._categories, self._proper_nouns)
+        data = self._load_json(
+            self._responses(
+                prompt,
+                max_output_tokens=self._proofread_max_output_tokens(texts),
+                text_format=proofread_output_format(len(texts), self._categories),
+                feature="proofread_batch",
+            )
+        )
+
+        raw_results = data.get("results")
+        if not isinstance(raw_results, list) or len(raw_results) != len(texts):
+            got = len(raw_results) if isinstance(raw_results, list) else "N/A"
+            raise LLMError(
+                f"교정 응답의 results 개수가 입력과 다릅니다 (기대 {len(texts)}개, 응답 {got}개)"
+            )
 
         out: list[list[ProofreadFinding]] = [[] for _ in texts]
-        results = data.get("results", []) if isinstance(data, dict) else []
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            idx = item.get("index")
-            if not isinstance(idx, int) or not (0 <= idx < len(texts)):
-                continue
-            out[idx] = self._to_findings(item.get("findings", []))
+        seen: set[int] = set()
+        for item in raw_results:
+            idx = item.get("index") if isinstance(item, dict) else None
+            if type(idx) is not int or not (0 <= idx < len(texts)) or idx in seen:
+                raise LLMError("교정 응답의 index 가 잘못되었거나 중복되었습니다")
+            seen.add(idx)
+            raw_findings = item.get("findings")
+            if not isinstance(raw_findings, list):
+                raise LLMError("교정 응답의 findings 가 배열이 아닙니다")
+            out[idx] = self._to_findings(raw_findings, texts[idx])
         return out
+
+    def _proofread_max_output_tokens(self, texts: list[str]) -> int:
+        # 카테고리가 늘수록 지적도 늘어난다(기본 2개 카테고리 기준으로 비례)
+        category_factor = len(self._categories) / 2
+        base_tokens = max(800, sum(len(t) for t in texts) // 2 + 500)
+        if self._proofread_effort == "none" or not self._supports_reasoning():
+            cap, headroom = _PROOFREAD_NO_REASONING_MAX_OUTPUT_TOKENS, 0
+        else:
+            cap, headroom = (
+                _PROOFREAD_MAX_OUTPUT_TOKENS,
+                _PROOFREAD_REASONING_TOKEN_HEADROOM,
+            )
+        return min(cap, int(base_tokens * category_factor) + headroom)
+
+    def _supports_reasoning(self) -> bool:
+        return self._model.lower().startswith(_REASONING_MODEL_PREFIXES)
 
     def rewrite_query(self, question: str, history: list[tuple[str, str]]) -> str:
         if not history:
@@ -401,39 +456,144 @@ class OpenAILLMProvider:
             raise LLMError(f"OpenAI 응답 JSON 파싱 실패: {exc}") from exc
         return data if isinstance(data, dict) else {}
 
-    def _to_findings(self, raw) -> list[ProofreadFinding]:
-        findings: list[ProofreadFinding] = []
-        if not isinstance(raw, list):
-            return findings
+    def _responses(
+        self,
+        prompt: str,
+        *,
+        max_output_tokens: int,
+        text_format: dict,
+        feature: str,
+    ) -> str:
+        """Responses API 로 strict json_schema 응답을 받아 output_text 를 돌려준다"""
+        if not self._api_key:
+            raise LLMConfigError("OPENAI_API_KEY 가 설정되지 않았습니다")
+        payload: dict = {
+            "model": self._model,
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": prompt}]}
+            ],
+            "max_output_tokens": max_output_tokens,
+            "text": {"format": text_format},
+        }
+        # 추론을 끈 호출(또는 추론 미지원 모델)은 temperature 0 으로 결과를 고정한다.
+        # 추론 모드에서는 temperature 를 지정할 수 없다.
+        if self._supports_reasoning():
+            payload["reasoning"] = {"effort": self._proofread_effort}
+            if self._proofread_effort == "none":
+                payload["temperature"] = 0
+        else:
+            payload["temperature"] = 0
+
+        started = time.perf_counter()
+        try:
+            resp = httpx.post(
+                f"{self._base_url}/responses",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json=payload,
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        except httpx.HTTPStatusError as exc:
+            self._emit_usage(
+                feature=feature,
+                status="fail",
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error_message=f"HTTP {exc.response.status_code}: {exc.response.text[:200]}",
+            )
+            raise LLMError(
+                f"OpenAI 응답 오류 {exc.response.status_code}: {exc.response.text[:200]}"
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            self._emit_usage(
+                feature=feature,
+                status="fail",
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error_message=str(exc)[:500],
+            )
+            raise LLMError(f"OpenAI 호출 실패: {exc}") from exc
+
+        usage = body.get("usage") or {}
+        self._emit_usage(
+            feature=feature,
+            status="success",
+            latency_ms=(time.perf_counter() - started) * 1000,
+            usage={
+                "prompt_tokens": usage.get("input_tokens"),
+                "completion_tokens": usage.get("output_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+            },
+        )
+
+        if body.get("status") != "completed":
+            reason = (body.get("incomplete_details") or {}).get("reason")
+            raise LLMError(
+                f"교정 응답이 완료되지 않았습니다: {body.get('status')}"
+                + (f" ({reason})" if reason else "")
+            )
+        parts: list[str] = []
+        for output in body.get("output") or []:
+            if output.get("type") != "message":
+                continue
+            for part in output.get("content") or []:
+                if part.get("type") == "refusal":
+                    raise LLMError("모델이 교정 요청에 대한 응답을 거절했습니다")
+                if part.get("type") == "output_text":
+                    parts.append(part.get("text", ""))
+        return "".join(parts)
+
+    def _to_findings(self, raw: list, source_text: str) -> list[ProofreadFinding]:
+        """모델이 준 축약 finding(o/s/c/n)을 검증해 ProofreadFinding 으로 바꾼다.
+
+        원문(source_text)에 실제로 없는 구절, 정상 표기를 건드린 제안, 허용 카테고리 밖 제안,
+        고유명사를 건드린 제안은 버린다.
+        """
+        findings: list[dict] = []
+        recovered: list[dict] = []
         dropped = 0
         for item in raw:
-            if not isinstance(item, dict):
-                continue
-            original = str(item.get("original", "")).strip()
-            if not original:
-                continue
-            category = self._normalize_category(item.get("category"))
-            if category is None:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("o"), str)
+                or not isinstance(item.get("s"), str)
+                or not isinstance(item.get("c"), str)
+                or type(item.get("n")) is not int
+            ):
+                raise LLMError("교정 응답의 finding 형식이 잘못되었습니다")
+            parsed = parse_finding(item, self._allowed, self._proper_nouns)
+            if parsed is None:
                 dropped += 1
                 continue
-            findings.append(
-                ProofreadFinding(
-                    original=original,
-                    suggestion=str(item.get("suggestion", "")).strip(),
-                    reason=str(item.get("reason", "")).strip(),
-                    category=category,
-                )
-            )
-        if dropped:
-            # 프롬프트로 막아도 긴 문서에서는 종종 새어 나온다. 조용히 버리지 않고 남긴다.
-            logger.info("검사 범위 밖 지적 %d건 제외 (허용: %s)", dropped, self._categories)
-        return findings
+            count = source_text.count(parsed["original"])
+            if count < parsed["occurrence"]:
+                if count != 1:
+                    # 일치 문구가 없거나 후보가 여러 개면 위치를 추측하지 않는다.
+                    dropped += 1
+                    continue
+                # 등장 순서(n)만 틀리고 원문에 한 번만 있으면 그 위치로 보정한다.
+                parsed["occurrence"] = 1
+                recovered.append(parsed)
+                continue
+            findings.append(parsed)
 
-    def _normalize_category(self, raw) -> str | None:
-        """응답의 category 를 허용 목록에 맞춘다. 제외 대상이면 None"""
-        category = str(raw or "").strip().lower()
-        if category in self._allowed:
-            return category
-        if category in KNOWN_CATEGORIES:
-            return None
-        return self._categories[0]
+        # 정상 좌표로 반환된 교정이 있으면 보정된 제안보다 우선한다.
+        positions = {(f["original"], f["occurrence"]) for f in findings}
+        for f in recovered:
+            position = (f["original"], f["occurrence"])
+            if position not in positions:
+                findings.append(f)
+                positions.add(position)
+
+        if dropped:
+            # 프롬프트로 막아도 새어 나오는 제안이 있다. 조용히 버리지 않고 남긴다.
+            logger.info("교정 제안 %d건 제외 (허용: %s)", dropped, self._categories)
+        return [
+            ProofreadFinding(
+                original=f["original"],
+                suggestion=f["suggestion"],
+                reason=DEFAULT_REASONS[f["category"]],
+                category=f["category"],
+                occurrence=f["occurrence"],
+            )
+            for f in findings
+        ]
